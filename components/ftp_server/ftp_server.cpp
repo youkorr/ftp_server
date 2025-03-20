@@ -76,9 +76,9 @@ void FTPServer::loop() {
 }
 
 void FTPServer::dump_config() {
-  ESP_LOGCONFIG(TAG, "FTP Server:");
-  ESP_LOGCONFIG(TAG, "  Port: %d", port_);
-  ESP_LOGCONFIG(TAG, "  Root Path: %s", root_path_.c_str());
+  ESP_LOGI(TAG, "FTP Server:");
+  ESP_LOGI(TAG, "  Port: %d", port_);
+  ESP_LOGI(TAG, "  Root Path: %s", root_path_.c_str());
 }
 
 void FTPServer::handle_new_clients() {
@@ -127,7 +127,7 @@ void FTPServer::process_command(int client_socket, const std::string& command) {
   } else if (command.find("PASS") == 0) {
     std::string password = command.substr(5);
     password.erase(password.find_last_not_of("\r\n") + 1);
-    if (authenticate(client_usernames_[std::distance(client_sockets_.begin(), std::find(client_sockets_.begin(), client_sockets_.end(), client_socket)], password)) {
+    if (authenticate(client_usernames_[std::distance(client_sockets_.begin(), std::find(client_sockets_.begin(), client_sockets_.end(), client_socket))], password)) {
       client_states_[std::distance(client_sockets_.begin(), std::find(client_sockets_.begin(), client_sockets_.end(), client_socket))] = FTP_LOGGED_IN;
       send_response(client_socket, 230, "Login successful");
     } else {
