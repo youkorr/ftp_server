@@ -11,7 +11,7 @@
 #include <unistd.h>
 #include <lwip/sockets.h>
 #include <lwip/netdb.h>
-#include <tcpip_adapter.h>
+#include <esp_netif.h> // Remplacé tcpip_adapter.h par esp_netif.h
 
 namespace esphome {
 namespace ftp_server {
@@ -27,15 +27,22 @@ void FTPServer::setup() {
   ESP_LOGI(TAG, "Waiting for network stack to initialize...");
   vTaskDelay(pdMS_TO_TICKS(2000));  // Attendre 2 secondes après la connexion WiFi
 
-  // Vérifier l'état du réseau
-  tcpip_adapter_ip_info_t ip_info;
-  tcpip_adapter_get_ip_info(TCPIP_ADAPTER_IF_STA, &ip_info);
-  if (ip_info.ip.addr == 0) {
-    ESP_LOGW(TAG, "No IP address assigned yet. FTP server might not be accessible");
+  // Vérifier l'état du réseau avec esp_netif au lieu de tcpip_adapter
+  esp_netif_ip_info_t ip_info;
+  esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA");
+  if (netif == NULL) {
+    ESP_LOGW(TAG, "WiFi station interface not found");
   } else {
-    char ip_str[16];
-    sprintf(ip_str, IPSTR, IP2STR(&ip_info.ip));
-    ESP_LOGI(TAG, "FTP server IP address: %s", ip_str);
+    esp_err_t err = esp_netif_get_ip_info(netif, &ip_info);
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "Failed to get IP info: %s", esp_err_to_name(err));
+    } else if (ip_info.ip.addr == 0) {
+      ESP_LOGW(TAG, "No IP address assigned yet. FTP server might not be accessible");
+    } else {
+      char ip_str[16];
+      sprintf(ip_str, IPSTR, IP2STR(&ip_info.ip));
+      ESP_LOGI(TAG, "FTP server IP address: %s", ip_str);
+    }
   }
 
   // Initialize SD card with ESP-IDF specific configuration
@@ -178,10 +185,10 @@ void FTPServer::dump_config() {
   ESP_LOGI(TAG, "  Root Path: %s", root_path_.c_str());
   ESP_LOGI(TAG, "  Server Status: %s", is_running() ? "Running" : "Not Running");
   
-  // Afficher l'adresse IP pour faciliter la connexion
-  tcpip_adapter_ip_info_t ip_info;
-  tcpip_adapter_get_ip_info(TCPIP_ADAPTER_IF_STA, &ip_info);
-  if (ip_info.ip.addr != 0) {
+  // Afficher l'adresse IP pour faciliter la connexion en utilisant esp_netif
+  esp_netif_ip_info_t ip_info;
+  esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA");
+  if (netif != NULL && esp_netif_get_ip_info(netif, &ip_info) == ESP_OK && ip_info.ip.addr != 0) {
     char ip_str[16];
     sprintf(ip_str, IPSTR, IP2STR(&ip_info.ip));
     ESP_LOGI(TAG, "  Server IP: %s", ip_str);
@@ -371,11 +378,12 @@ bool FTPServer::authenticate(const std::string& username, const std::string& pas
 // Implémentation des méthodes restantes (list_directory, start_file_upload, start_file_download)
 // Ces méthodes sont déjà définies dans votre code original
 
-// Nouvelle méthode pour vérifier si le serveur est en cours d'exécution
+// Méthode pour vérifier si le serveur est en cours d'exécution
 bool FTPServer::is_running() const { 
   return ftp_server_socket_ >= 0; 
 }
 
 }  // namespace ftp_server
 }  // namespace esphome
+
 
