@@ -8,17 +8,31 @@
 #include <unistd.h>
 #include <lwip/sockets.h>
 
-
 namespace esphome {
 namespace ftp_server {
 
 static const char *TAG = "ftp_server";
+
+// États du client FTP
+enum FTPClientState {
+  FTP_WAIT_LOGIN,
+  FTP_LOGGED_IN
+};
 
 FTPServer::FTPServer() {}
 
 void FTPServer::setup() {
   ESP_LOGI(TAG, "Setting up FTP server...");
 
+  // Vérifier si la carte SD est initialisée
+  if (!sd_mmc_card_) {
+    ESP_LOGE(TAG, "SD Card not initialized");
+    return;
+  }
+
+  // Initialiser le chemin racine avec le chemin de la carte SD
+  root_path_ = sd_mmc_card_->get_mount_point();
+  current_path_ = root_path_;
 
   // Initialize FTP server socket
   ftp_server_socket_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -58,9 +72,6 @@ void FTPServer::setup() {
 
   ESP_LOGI(TAG, "FTP server started on port %d", port_);
   ESP_LOGI(TAG, "Root directory: %s", root_path_.c_str());
-
-  // Set the default current path
-  current_path_ = root_path_;
 }
 
 void FTPServer::loop() {
@@ -170,10 +181,8 @@ void FTPServer::process_command(int client_socket, const std::string& command) {
         full_path = client_current_paths_[client_index] + "/" + path;
       }
       
-      // Check if directory exists
-      DIR *dir = opendir(full_path.c_str());
-      if (dir != nullptr) {
-        closedir(dir);
+      // Vérifier si le répertoire existe sur la carte SD
+      if (sd_mmc_card_ && sd_mmc_card_->is_directory(full_path)) {
         client_current_paths_[client_index] = full_path;
         send_response(client_socket, 250, "Directory successfully changed");
       } else {
@@ -252,6 +261,18 @@ bool FTPServer::authenticate(const std::string& username, const std::string& pas
 }
 
 void FTPServer::list_directory(int client_socket, const std::string& path) {
+  // Vérifier si la carte SD est initialisée
+  if (!sd_mmc_card_) {
+    send_response(client_socket, 550, "SD Card not initialized");
+    return;
+  }
+
+  // Vérifier si le chemin est un répertoire valide
+  if (!sd_mmc_card_->is_directory(path)) {
+    send_response(client_socket, 550, "Invalid directory path");
+    return;
+  }
+
   DIR *dir = opendir(path.c_str());
   if (dir == nullptr) {
     send_response(client_socket, 550, "Failed to open directory");
@@ -264,7 +285,7 @@ void FTPServer::list_directory(int client_socket, const std::string& path) {
   while ((entry = readdir(dir)) != nullptr) {
     std::string entry_name = entry->d_name;
     if (entry_name == "." || entry_name == "..") {
-      continue;  // Skip . and .. directories
+      continue;  // Ignorer les répertoires . et ..
     }
     
     std::string full_path = path + "/" + entry_name;
@@ -363,6 +384,7 @@ void FTPServer::start_file_download(int client_socket, const std::string& path) 
 
 }  // namespace ftp_server
 }  // namespace esphome
+
 
 
 
