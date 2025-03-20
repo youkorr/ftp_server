@@ -58,3 +58,4 @@ class FTPServer : public Component {
 
 }  // namespace ftp_server
 }  // namespace esphome
+
