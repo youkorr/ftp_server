@@ -7,7 +7,7 @@ CODEOWNERS = ['@votre_nom']
 
 # Définir les constantes pour la configuration
 CONF_ROOT_PATH = 'root_path'
-CONF_URL_PREFIX = 'url_prefix'
+
 
 # Créer l'espace de noms et la classe FTP
 ftp_ns = cg.esphome_ns.namespace('ftp_server')
@@ -19,7 +19,6 @@ CONFIG_SCHEMA = cv.Schema({
     cv.Required(CONF_USERNAME): cv.string,
     cv.Required(CONF_PASSWORD): cv.string,
     cv.Required(CONF_ROOT_PATH): cv.string,
-    cv.Optional(CONF_URL_PREFIX, default=''): cv.string,
     cv.Optional(CONF_PORT, default=21): cv.port,
 }).extend(cv.COMPONENT_SCHEMA)
 
@@ -31,5 +30,4 @@ async def to_code(config):
     cg.add(var.set_username(config[CONF_USERNAME]))
     cg.add(var.set_password(config[CONF_PASSWORD]))
     cg.add(var.set_root_path(config[CONF_ROOT_PATH]))
-    cg.add(var.set_url_prefix(config[CONF_URL_PREFIX]))
     cg.add(var.set_port(config[CONF_PORT]))
