@@ -25,7 +25,7 @@ CONFIG_SCHEMA = cv.Schema({
     cv.Optional(CONF_PORT, default=21): cv.port,
     
     # Ajout de la configuration de la carte SD
-    cv.Required(CONF_SD_CARD): cv.use_id(sd_mmc_card.SDCard)
+    cv.Required(CONF_SD_CARD): cv.use_id(sd_mmc_card.SDMMCCard)
 }).extend(cv.COMPONENT_SCHEMA)
 
 async def to_code(config):
@@ -41,6 +41,7 @@ async def to_code(config):
     # Lier la carte SD au serveur FTP
     sd_card_var = await cg.get_variable(config[CONF_SD_CARD])
     cg.add(var.set_sd_mmc_card(sd_card_var))
+
 
 
 
