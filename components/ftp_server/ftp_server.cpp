@@ -2,7 +2,6 @@
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
 #include "driver/sdmmc_host.h"
-#include "driver/sdspi_host.h"
 #include "driver/sdmmc_defs.h"
 #include "sdmmc_cmd.h"
 #include <cstring>
@@ -11,10 +10,6 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <lwip/sockets.h>
-#include <lwip/netdb.h>
-#include <esp_netif.h> // API moderne pour remplacer tcpip_adapter
-#include <arpa/inet.h> // Pour inet_ntoa
-#include <time.h>      // Pour localtime
 
 namespace esphome {
 namespace ftp_server {
@@ -24,106 +19,38 @@ static const char *TAG = "ftp_server";
 FTPServer::FTPServer() {}
 
 void FTPServer::setup() {
-  ESP_LOGI(TAG, "Setting up FTP server for ESP-IDF framework...");
+  ESP_LOGI(TAG, "Setting up FTP server...");
 
-  // Attendre que la pile TCP/IP soit complètement initialisée
-  ESP_LOGI(TAG, "Waiting for network stack to initialize...");
-  vTaskDelay(pdMS_TO_TICKS(2000));  // Attendre 2 secondes après la connexion WiFi
-
-  // Vérifier l'état du réseau avec esp_netif au lieu de tcpip_adapter
-  esp_netif_ip_info_t ip_info;
-  esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA");
-  if (netif == NULL) {
-    ESP_LOGW(TAG, "WiFi station interface not found");
-  } else {
-    esp_err_t err = esp_netif_get_ip_info(netif, &ip_info);
-    if (err != ESP_OK) {
-      ESP_LOGW(TAG, "Failed to get IP info: %s", esp_err_to_name(err));
-    } else if (ip_info.ip.addr == 0) {
-      ESP_LOGW(TAG, "No IP address assigned yet. FTP server might not be accessible");
-    } else {
-      char ip_str[16];
-      sprintf(ip_str, IPSTR, IP2STR(&ip_info.ip));
-      ESP_LOGI(TAG, "FTP server IP address: %s", ip_str);
-    }
-  }
-
-  // Utiliser la configuration de slot standard
+  // Initialize SD card
+  sdmmc_host_t host = SDMMC_HOST_DEFAULT();
   sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
-  
   esp_vfs_fat_sdmmc_mount_config_t mount_config = {
       .format_if_mount_failed = false,
       .max_files = 5,
       .allocation_unit_size = 16 * 1024
   };
   sdmmc_card_t *card;
-  
-  // Monter la carte SD avec la nouvelle configuration SPI
-  esp_err_t ret = esp_vfs_fat_sdspi_mount("/sdcard", &host, &device_config, &mount_config, &card);
+  esp_err_t ret = esp_vfs_fat_sdmmc_mount("/sdcard", &host, &slot_config, &mount_config, &card);
   if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to mount SD card: %s (error code: %d)", esp_err_to_name(ret), ret);
-    // Ajouter des informations de débogage spécifiques à ESP-IDF
-    if (ret == ESP_ERR_TIMEOUT) {
-      ESP_LOGE(TAG, "SD card timeout. Check your SPI connections and speed");
-    } else if (ret == ESP_ERR_INVALID_RESPONSE) {
-      ESP_LOGE(TAG, "SD card invalid response. Card might be damaged or incompatible");
-    } else if (ret == ESP_ERR_INVALID_STATE) {
-      ESP_LOGE(TAG, "SD card invalid state. Try power cycling the card");
-    }
+    ESP_LOGE(TAG, "Failed to mount SD card: %s", esp_err_to_name(ret));
     return;
   }
   ESP_LOGI(TAG, "SD card mounted successfully");
 
-  // Vérifier si le port est déjà utilisé (spécifique à ESP-IDF)
-  struct sockaddr_in addr;
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(port_);
-  addr.sin_addr.s_addr = htonl(INADDR_ANY);
-
-  int test_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  if (test_socket < 0) {
-    ESP_LOGE(TAG, "Cannot create test socket: errno %d", errno);
-  } else {
-    int err = bind(test_socket, (struct sockaddr*)&addr, sizeof(addr));
-    close(test_socket);
-    if (err < 0) {
-      ESP_LOGE(TAG, "Port %d is already in use (errno %d). Try another port.", port_, errno);
-    } else {
-      ESP_LOGI(TAG, "Port %d is available", port_);
-    }
-  }
-
   // Initialize FTP server socket
-  // Avant de créer le socket, vérifiez si un socket existant est déjà ouvert
-  if (ftp_server_socket_ >= 0) {
-    close(ftp_server_socket_);
-    ftp_server_socket_ = -1;
-  }
-
-  // Créez le socket avec plus de vérifications d'erreurs
   ftp_server_socket_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (ftp_server_socket_ < 0) {
-    ESP_LOGE(TAG, "Failed to create FTP server socket: errno %d", errno);
+    ESP_LOGE(TAG, "Failed to create FTP server socket");
     return;
   }
 
-  // Set socket options for ESP-IDF
+  // Set socket option to reuse address
   int opt = 1;
   if (setsockopt(ftp_server_socket_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-    ESP_LOGE(TAG, "Failed to set SO_REUSEADDR: errno %d", errno);
+    ESP_LOGE(TAG, "Failed to set socket options");
+    close(ftp_server_socket_);
+    return;
   }
-
-  // Ajouter également cette option pour ESP-IDF
-  if (setsockopt(ftp_server_socket_, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) {
-    ESP_LOGE(TAG, "Failed to set SO_REUSEPORT: errno %d", errno);
-    // Ne pas retourner ici, car SO_REUSEPORT n'est pas supporté sur toutes les versions d'ESP-IDF
-  }
-
-  // Augmenter la taille des tampons pour de meilleures performances avec ESP-IDF
-  int recv_buffer_size = 8192;
-  int send_buffer_size = 8192;
-  setsockopt(ftp_server_socket_, SOL_SOCKET, SO_RCVBUF, &recv_buffer_size, sizeof(recv_buffer_size));
-  setsockopt(ftp_server_socket_, SOL_SOCKET, SO_SNDBUF, &send_buffer_size, sizeof(send_buffer_size));
 
   struct sockaddr_in server_addr;
   memset(&server_addr, 0, sizeof(server_addr));
@@ -132,20 +59,14 @@ void FTPServer::setup() {
   server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
   if (bind(ftp_server_socket_, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-    ESP_LOGE(TAG, "Failed to bind FTP server socket: errno %d", errno);
-    // Vérifiez si le port est déjà utilisé
-    if (errno == EADDRINUSE) {
-      ESP_LOGE(TAG, "Port %d is already in use. Try changing the port.", port_);
-    }
+    ESP_LOGE(TAG, "Failed to bind FTP server socket");
     close(ftp_server_socket_);
-    ftp_server_socket_ = -1;
     return;
   }
 
   if (listen(ftp_server_socket_, 5) < 0) {
-    ESP_LOGE(TAG, "Failed to listen on FTP server socket: errno %d", errno);
+    ESP_LOGE(TAG, "Failed to listen on FTP server socket");
     close(ftp_server_socket_);
-    ftp_server_socket_ = -1;
     return;
   }
 
@@ -157,9 +78,6 @@ void FTPServer::setup() {
 
   // Set the default current path
   current_path_ = root_path_;
-  
-  // Ajouter un message de statut à la fin de setup()
-  ESP_LOGI(TAG, "FTP server %s", (ftp_server_socket_ >= 0) ? "started successfully" : "failed to start");
 }
 
 void FTPServer::loop() {
@@ -171,21 +89,9 @@ void FTPServer::loop() {
 }
 
 void FTPServer::dump_config() {
-  ESP_LOGI(TAG, "FTP Server (ESP-IDF):");
+  ESP_LOGI(TAG, "FTP Server:");
   ESP_LOGI(TAG, "  Port: %d", port_);
   ESP_LOGI(TAG, "  Root Path: %s", root_path_.c_str());
-  ESP_LOGI(TAG, "  Server Status: %s", is_running() ? "Running" : "Not Running");
-  
-  // Afficher l'adresse IP pour faciliter la connexion en utilisant esp_netif
-  esp_netif_ip_info_t ip_info;
-  esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA");
-  if (netif != NULL && esp_netif_get_ip_info(netif, &ip_info) == ESP_OK && ip_info.ip.addr != 0) {
-    char ip_str[16];
-    sprintf(ip_str, IPSTR, IP2STR(&ip_info.ip));
-    ESP_LOGI(TAG, "  Server IP: %s", ip_str);
-  } else {
-    ESP_LOGI(TAG, "  Server IP: Not available yet");
-  }
 }
 
 void FTPServer::handle_new_clients() {
@@ -197,11 +103,7 @@ void FTPServer::handle_new_clients() {
     // Set client socket to non-blocking mode
     fcntl(client_socket, F_SETFL, O_NONBLOCK);
     
-    // Log client IP address (ESP-IDF specific) - Utiliser inet_ntoa au lieu de IP2STR
-    char client_ip[16];
-    strcpy(client_ip, inet_ntoa(client_addr.sin_addr));
-    ESP_LOGI(TAG, "New FTP client connected from %s", client_ip);
-    
+    ESP_LOGI(TAG, "New FTP client connected");
     client_sockets_.push_back(client_socket);
     client_states_.push_back(FTP_WAIT_LOGIN);
     client_usernames_.push_back("");
@@ -366,16 +268,15 @@ bool FTPServer::authenticate(const std::string& username, const std::string& pas
   return username == username_ && password == password_;
 }
 
-// Implémentation des méthodes manquantes
 void FTPServer::list_directory(int client_socket, const std::string& path) {
   DIR *dir = opendir(path.c_str());
   if (dir == nullptr) {
     send_response(client_socket, 550, "Failed to open directory");
     return;
   }
-  
+
   send_response(client_socket, 150, "Opening ASCII mode data connection for file list");
-  
+
   struct dirent *entry;
   while ((entry = readdir(dir)) != nullptr) {
     std::string entry_name = entry->d_name;
@@ -412,6 +313,7 @@ void FTPServer::list_directory(int client_socket, const std::string& path) {
       send(client_socket, list_item, strlen(list_item), 0);
     }
   }
+
   closedir(dir);
   send_response(client_socket, 226, "Directory send OK");
 }
@@ -422,17 +324,19 @@ void FTPServer::start_file_upload(int client_socket, const std::string& path) {
     send_response(client_socket, 550, "Failed to open file for writing");
     return;
   }
+
   send_response(client_socket, 150, "Opening connection for file upload");
-  
+
   // Set socket to blocking mode for data transfer
   int flags = fcntl(client_socket, F_GETFL, 0);
   fcntl(client_socket, F_SETFL, flags & ~O_NONBLOCK);
-  
+
   char buffer[2048];
   int len;
   while ((len = recv(client_socket, buffer, sizeof(buffer), 0)) > 0) {
     write(file_fd, buffer, len);
   }
+
   close(file_fd);
   
   // Restore non-blocking mode
@@ -447,7 +351,7 @@ void FTPServer::start_file_download(int client_socket, const std::string& path) 
     send_response(client_socket, 550, "Failed to open file for reading");
     return;
   }
-  
+
   // Get file size
   struct stat file_stat;
   fstat(file_fd, &file_stat);
@@ -455,27 +359,23 @@ void FTPServer::start_file_download(int client_socket, const std::string& path) 
   std::string size_msg = "Opening connection for file download (" + 
                           std::to_string(file_stat.st_size) + " bytes)";
   send_response(client_socket, 150, size_msg);
-  
+
   // Set socket to blocking mode for data transfer
   int flags = fcntl(client_socket, F_GETFL, 0);
   fcntl(client_socket, F_SETFL, flags & ~O_NONBLOCK);
-  
+
   char buffer[2048];
   int len;
   while ((len = read(file_fd, buffer, sizeof(buffer))) > 0) {
     send(client_socket, buffer, len, 0);
   }
+
   close(file_fd);
   
   // Restore non-blocking mode
   fcntl(client_socket, F_SETFL, flags);
   
   send_response(client_socket, 226, "File download complete");
-}
-
-// Méthode pour vérifier si le serveur est en cours d'exécution
-bool FTPServer::is_running() const { 
-  return ftp_server_socket_ >= 0; 
 }
 
 }  // namespace ftp_server
