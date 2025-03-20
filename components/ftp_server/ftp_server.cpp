@@ -1,5 +1,6 @@
 #include "ftp_server.h"
 #include "esp_log.h"
+#include "../sd_mmc_card/sd_mmc_card.h" 
 #include "esp_vfs_fat.h"
 #include "driver/sdmmc_host.h"
 #include "driver/sdmmc_defs.h"
