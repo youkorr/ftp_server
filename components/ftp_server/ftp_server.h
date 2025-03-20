@@ -21,11 +21,17 @@ class FTPServer : public Component {
   void setup() override;
   void loop() override;
   void dump_config() override;
+  
+  // Définir une priorité d'initialisation tardive pour ESP-IDF
+  float get_setup_priority() const override { return setup_priority::LATE - 1; }
 
   void set_port(uint16_t port) { port_ = port; }
   void set_username(const std::string &username) { username_ = username; }
   void set_password(const std::string &password) { password_ = password; }
   void set_root_path(const std::string &root_path) { root_path_ = root_path; }
+  
+  // Méthode pour vérifier si le serveur est en cours d'exécution
+  bool is_running() const;
 
  protected:
   void handle_new_clients();
