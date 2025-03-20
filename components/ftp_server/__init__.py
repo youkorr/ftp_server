@@ -1,6 +1,6 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.const import CONF_ID, CONF_PASSWORD, CONF_USERNAME, CONF_PORT
+from esphome.const import CONF_ID, CONF_PASSWORD, CONF_USERNAME, CONF_PORT, CONF_HOST
 
 DEPENDENCIES = ['network']
 CODEOWNERS = ['@votre_nom']
@@ -18,6 +18,7 @@ CONFIG_SCHEMA = cv.Schema({
     cv.Required(CONF_USERNAME): cv.string,
     cv.Required(CONF_PASSWORD): cv.string,
     cv.Required(CONF_ROOT_PATH): cv.string,
+    cv.Optional(CONF_HOST, default="0.0.0.0"): cv.string,
     cv.Optional(CONF_PORT, default=21): cv.port,
 }).extend(cv.COMPONENT_SCHEMA)
 
@@ -29,4 +30,5 @@ async def to_code(config):
     cg.add(var.set_username(config[CONF_USERNAME]))
     cg.add(var.set_password(config[CONF_PASSWORD]))
     cg.add(var.set_root_path(config[CONF_ROOT_PATH]))
+    cg.add(var.set_host(config[CONF_HOST]))
     cg.add(var.set_port(config[CONF_PORT]))
