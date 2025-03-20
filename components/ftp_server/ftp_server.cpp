@@ -48,26 +48,6 @@ void FTPServer::setup() {
     }
   }
 
-  // Initialize SD card with ESP-IDF specific configuration
-  // Configuration mise à jour pour les versions récentes d'ESP-IDF
-  sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-  
-  // Utiliser SPI3_HOST au lieu de VSPI_HOST (qui est déprécié)
-  host.slot = SPI3_HOST;
-  
-  // Configuration SPI mise à jour pour les versions récentes d'ESP-IDF
-  sdspi_device_config_t device_config = {
-      .host_id = SPI3_HOST,
-      .gpio_cs = GPIO_NUM_5,    // Ajustez selon votre câblage
-      .gpio_cd = SDSPI_SLOT_NO_CD,
-      .gpio_wp = SDSPI_SLOT_NO_WP,
-      .gpio_int = SDSPI_SLOT_NO_INT,
-      .gpio_miso = GPIO_NUM_19, // Ajustez selon votre câblage
-      .gpio_mosi = GPIO_NUM_23, // Ajustez selon votre câblage
-      .gpio_sck = GPIO_NUM_18,  // Ajustez selon votre câblage
-      .dma_channel = 1,
-  };
-  
   // Utiliser la configuration de slot standard
   sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
   
