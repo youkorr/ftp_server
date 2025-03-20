@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esphome/core/component.h"
+#include "../sd_mmc_card/sd_mmc_card.h"  // Ajout de l'inclusion pour la carte SD
 #include <string>
 #include <vector>
 #include <sys/socket.h>
@@ -30,6 +31,9 @@ class FTPServer : public Component {
   void set_password(const std::string &password) { password_ = password; }
   void set_root_path(const std::string &root_path) { root_path_ = root_path; }
   
+  // Nouvelle méthode pour définir la carte SD
+  void set_sd_mmc_card(SDMMCCard* card) { sd_mmc_card_ = card; }
+  
   // Méthode pour vérifier si le serveur est en cours d'exécution
   bool is_running() const;
 
@@ -43,6 +47,9 @@ class FTPServer : public Component {
   void start_file_upload(int client_socket, const std::string& path);
   void start_file_download(int client_socket, const std::string& path);
 
+  // Pointeur vers la carte SD
+  SDMMCCard* sd_mmc_card_ = nullptr;
+
   uint16_t port_{21};
   std::string username_{"admin"};
   std::string password_{"admin"};
@@ -54,8 +61,12 @@ class FTPServer : public Component {
   std::vector<FTPClientState> client_states_;
   std::vector<std::string> client_usernames_;
   std::vector<std::string> client_current_paths_;
+
+  // Méthode privée pour valider le chemin de la carte SD
+  bool is_valid_sd_path(const std::string& path) const;
 };
 
 }  // namespace ftp_server
 }  // namespace esphome
+
 
