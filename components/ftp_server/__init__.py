@@ -2,7 +2,7 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_PASSWORD, CONF_USERNAME, CONF_PORT
 
-# Importer la configuration de la carte SD
+# Importer la configuration de la carte SD MMC
 from esphome.components import sd_mmc_card
 
 DEPENDENCIES = ['network', 'sd_mmc_card']
@@ -24,7 +24,7 @@ CONFIG_SCHEMA = cv.Schema({
     cv.Optional(CONF_ROOT_PATH, default='/sdcard'): cv.string,
     cv.Optional(CONF_PORT, default=21): cv.port,
     
-    # Ajout de la configuration de la carte SD
+    # Ajout de la configuration de la carte SD MMC
     cv.Required(CONF_SD_CARD): cv.use_id(sd_mmc_card.SDMMCCard)
 }).extend(cv.COMPONENT_SCHEMA)
 
@@ -38,7 +38,8 @@ async def to_code(config):
     cg.add(var.set_root_path(config[CONF_ROOT_PATH]))
     cg.add(var.set_port(config[CONF_PORT]))
     
-    # Lier la carte SD au serveur FTP
-    sd_card = await cg.get_variable(config[CONF_SD_CARD])
-    cg.add(var.set_sd_mmc_card(sd_card))
+    # Lier la carte SD MMC au serveur FTP
+    sd_card_var = await cg.get_variable(config[CONF_SD_CARD])
+    cg.add(var.set_sd_mmc_card(sd_card_var))
+
 
