@@ -1,7 +1,7 @@
 #pragma once
 
 #include "esphome/core/component.h"
-#include "../sd_mmc_card/sd_mmc_card.h"  // Ajout de l'inclusion pour la carte SD
+#include "esphome/components/sd_mmc_card/sd_mmc_card.h"
 #include <string>
 #include <vector>
 #include <sys/socket.h>
@@ -23,18 +23,16 @@ class FTPServer : public Component {
   void loop() override;
   void dump_config() override;
   
-  // Définir une priorité d'initialisation tardive pour ESP-IDF
-  float get_setup_priority() const override { return setup_priority::LATE - 1; }
+  float get_setup_priority() const override { 
+    return setup_priority::LATE - 1; 
+  }
 
   void set_port(uint16_t port) { port_ = port; }
   void set_username(const std::string &username) { username_ = username; }
   void set_password(const std::string &password) { password_ = password; }
   void set_root_path(const std::string &root_path) { root_path_ = root_path; }
-  
-  // Nouvelle méthode pour définir la carte SD
   void set_sd_mmc_card(SDMMCCard* card) { sd_mmc_card_ = card; }
   
-  // Méthode pour vérifier si le serveur est en cours d'exécution
   bool is_running() const;
 
  protected:
@@ -62,11 +60,12 @@ class FTPServer : public Component {
   std::vector<std::string> client_usernames_;
   std::vector<std::string> client_current_paths_;
 
-  // Méthode privée pour valider le chemin de la carte SD
+ private:
   bool is_valid_sd_path(const std::string& path) const;
 };
 
 }  // namespace ftp_server
 }  // namespace esphome
+
 
 
