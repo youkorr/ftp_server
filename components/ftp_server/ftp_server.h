@@ -1,10 +1,12 @@
 #pragma once
 
-#include "esphome/core/component.h"
 #include <string>
 #include <vector>
-#include <sys/socket.h>
-#include <netinet/in.h>
+#include <map>
+#include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_log.h"
 
 namespace esphome {
 namespace ftp_server {
@@ -14,13 +16,14 @@ enum FTPClientState {
   FTP_LOGGED_IN
 };
 
-class FTPServer : public Component {
+class FTPServer {
  public:
   FTPServer();
+  ~FTPServer();
 
-  void setup() override;
-  void loop() override;
-  void dump_config() override;
+  void setup();
+  void loop();
+  void dump_config();
 
   void set_port(uint16_t port) { port_ = port; }
   void set_username(const std::string &username) { username_ = username; }
@@ -33,9 +36,11 @@ class FTPServer : public Component {
   void process_command(int client_socket, const std::string& command);
   void send_response(int client_socket, int code, const std::string& message);
   bool authenticate(const std::string& username, const std::string& password);
-  void list_directory(int client_socket, const std::string& path);
-  void start_file_upload(int client_socket, const std::string& path);
-  void start_file_download(int client_socket, const std::string& path);
+  void list_directory(int data_socket, const std::string& path);
+  bool change_directory(size_t client_index, const std::string& path);
+  int accept_data_connection(int client_socket);
+  void send_file(int client_socket, int data_socket, const std::string& filepath);
+  void receive_file(int client_socket, int data_socket, const std::string& filepath);
 
   uint16_t port_{21};
   std::string username_{"admin"};
@@ -48,6 +53,10 @@ class FTPServer : public Component {
   std::vector<FTPClientState> client_states_;
   std::vector<std::string> client_usernames_;
   std::vector<std::string> client_current_paths_;
+  std::map<int, int> data_sockets_;
+
+  TaskHandle_t ftp_task_handle_{nullptr};
+  static void ftp_task(void* pvParameters);
 };
 
 }  // namespace ftp_server
