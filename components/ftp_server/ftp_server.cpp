@@ -352,15 +352,7 @@ void FTPServer::list_directory(int client_socket, const std::string& path) {
     return;
   }
 
-  int data_socket = open_data_connection(client_socket);
-  if (data_socket < 0) {
-    send_response(client_socket, 425, "Can't open data connection.");
-    closedir(dir);
-    return;
-  }
-
   send_response(client_socket, 150, "Opening ASCII mode data connection for file list");
-
   struct dirent *entry;
   while ((entry = readdir(dir)) != nullptr) {
     std::string entry_name = entry->d_name;
@@ -390,13 +382,11 @@ void FTPServer::list_directory(int client_socket, const std::string& path) {
       snprintf(list_item, sizeof(list_item), "%s %3d %s %s %8ld %s %s\r\n",
                perm_str, 1, user_name.c_str(), group_name.c_str(),
                (long) entry_stat.st_size, time_str, entry_name.c_str());
-      send(data_socket, list_item, strlen(list_item), 0);
+      send(client_socket, list_item, strlen(list_item), 0);
     }
   }
 
   closedir(dir);
-  close(data_socket);
-  close_data_connection(client_socket);
   send_response(client_socket, 226, "Directory send OK");
 }
 
@@ -407,24 +397,22 @@ void FTPServer::start_file_upload(int client_socket, const std::string& path) {
     return;
   }
 
-  int data_socket = open_data_connection(client_socket);
-  if (data_socket < 0) {
-    send_response(client_socket, 425, "Can't open data connection.");
-    close(file_fd);
-    return;
-  }
-
   send_response(client_socket, 150, "Opening connection for file upload");
+
+  // Set socket to blocking mode for data transfer
+  int flags = fcntl(client_socket, F_GETFL, 0);
+  fcntl(client_socket, F_SETFL, flags & ~O_NONBLOCK);
 
   char buffer[2048];
   int len;
-  while ((len = recv(data_socket, buffer, sizeof(buffer), 0)) > 0) {
+  while ((len = recv(client_socket, buffer, sizeof(buffer), 0)) > 0) {
     write(file_fd, buffer, len);
   }
 
   close(file_fd);
-  close(data_socket);
-  close_data_connection(client_socket);
+
+  // Restore non-blocking mode
+  fcntl(client_socket, F_SETFL, flags);
   send_response(client_socket, 226, "File upload complete");
 }
 
@@ -435,13 +423,6 @@ void FTPServer::start_file_download(int client_socket, const std::string& path) 
     return;
   }
 
-  int data_socket = open_data_connection(client_socket);
-  if (data_socket < 0) {
-    send_response(client_socket, 425, "Can't open data connection.");
-    close(file_fd);
-    return;
-  }
-
   // Get file size
   struct stat file_stat;
   fstat(file_fd, &file_stat);
@@ -449,15 +430,20 @@ void FTPServer::start_file_download(int client_socket, const std::string& path) 
                           std::to_string(file_stat.st_size) + " bytes)";
   send_response(client_socket, 150, size_msg);
 
+  // Set socket to blocking mode for data transfer
+  int flags = fcntl(client_socket, F_GETFL, 0);
+  fcntl(client_socket, F_SETFL, flags & ~O_NONBLOCK);
+
   char buffer[2048];
   int len;
   while ((len = read(file_fd, buffer, sizeof(buffer))) > 0) {
-    send(data_socket, buffer, len, 0);
+    send(client_socket, buffer, len, 0);
   }
 
   close(file_fd);
-  close(data_socket);
-  close_data_connection(client_socket);
+
+  // Restore non-blocking mode
+  fcntl(client_socket, F_SETFL, flags);
   send_response(client_socket, 226, "File download complete");
 }
 
@@ -467,6 +453,7 @@ bool FTPServer::is_running() const {
 
 }  // namespace ftp_server
 }  // namespace esphome
+
 
 
 
