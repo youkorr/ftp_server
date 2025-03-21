@@ -5,6 +5,7 @@
 #include <vector>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 
 namespace esphome {
 namespace ftp_server {
@@ -17,11 +18,10 @@ enum FTPClientState {
 class FTPServer : public Component {
  public:
   FTPServer();
-
   void setup() override;
   void loop() override;
   void dump_config() override;
-  
+
   // Définir une priorité d'initialisation tardive pour ESP-IDF
   float get_setup_priority() const override { return setup_priority::LATE - 1; }
 
@@ -29,7 +29,7 @@ class FTPServer : public Component {
   void set_username(const std::string &username) { username_ = username; }
   void set_password(const std::string &password) { password_ = password; }
   void set_root_path(const std::string &root_path) { root_path_ = root_path; }
-  
+
   // Méthode pour vérifier si le serveur est en cours d'exécution
   bool is_running() const;
 
@@ -48,14 +48,26 @@ class FTPServer : public Component {
   std::string password_{"admin"};
   std::string root_path_{"/sdcard"};
   std::string current_path_;
-
   int ftp_server_socket_{-1};
   std::vector<int> client_sockets_;
   std::vector<FTPClientState> client_states_;
   std::vector<std::string> client_usernames_;
   std::vector<std::string> client_current_paths_;
+
+  // Variables pour le mode passif
+  bool passive_mode_enabled_ = false;
+  int passive_data_socket_ = -1;
+  int passive_data_port_ = -1;
+  std::string passive_client_ip_;
+
+  // Méthodes pour le mode passif
+  bool start_passive_mode(int client_socket);
+  int open_data_connection(int client_socket);
+  void close_data_connection(int client_socket);
 };
 
 }  // namespace ftp_server
 }  // namespace esphome
+
+
 
