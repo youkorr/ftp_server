@@ -13,6 +13,7 @@
 #include <chrono>
 #include <ctime>
 #include "esp_netif.h"
+#include "esp_err.h"
 
 namespace esphome {
 namespace ftp_server {
@@ -294,20 +295,19 @@ bool FTPServer::start_passive_mode(int client_socket) {
 
   // Envoyer la réponse au client avec l'adresse IP et le port
   char ip_str[INET_ADDRSTRLEN];
-  esp_netif_ip_info_t ip_info;
-  esp_netif_t *netif = esp_netif_get_default_eth();
-  if (netif == nullptr) {
-    netif = esp_netif_get_default_wifi_sta();
-  }
-  if (netif == nullptr) {
-    netif = esp_netif_get_default_wifi_ap();
-  }
+  esp_netif_t *netif = esp_netif_get_default_netif();
   if (netif == nullptr) {
     ESP_LOGE(TAG, "No netif found");
     close(passive_data_socket_);
     return false;
   }
-  esp_netif_get_ip_info(netif, &ip_info);
+  esp_netif_ip_info_t ip_info;
+  esp_err_t err = esp_netif_get_ip_info(netif, &ip_info);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to get IP info: %s", esp_err_to_name(err));
+    close(passive_data_socket_);
+    return false;
+  }
   inet_ntop(AF_INET, &ip_info.ip.addr, ip_str, INET_ADDRSTRLEN);
 
   // Convertir l'adresse IP en format numérique pour la réponse
@@ -467,6 +467,7 @@ bool FTPServer::is_running() const {
 
 }  // namespace ftp_server
 }  // namespace esphome
+
 
 
 
