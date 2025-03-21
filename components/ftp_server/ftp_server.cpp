@@ -20,7 +20,10 @@ namespace ftp_server {
 
 static const char *TAG = "ftp_server";
 
-FTPServer::FTPServer() {}
+FTPServer::FTPServer() : 
+    passive_data_socket_(-1),
+    passive_data_port_(-1),
+    passive_mode_enabled_(false) {}
 
 void FTPServer::setup() {
   ESP_LOGI(TAG, "Setting up FTP server...");
@@ -155,6 +158,7 @@ void FTPServer::process_command(int client_socket, const std::string& command) {
     send_response(client_socket, 530, "Not logged in");
   } else if (cmd_str.find("LIST") == 0) {
     std::string path = client_current_paths_[client_index];
+    send_response(client_socket, 150, "Opening ASCII mode data connection for file list");
     list_directory(client_socket, path);
   } else if (cmd_str.find("CWD") == 0) {
     std::string path = cmd_str.substr(4);
@@ -169,7 +173,7 @@ void FTPServer::process_command(int client_socket, const std::string& command) {
         full_path = client_current_paths_[client_index] + "/" + path;
       }
 
-        // Correction : Rendre le chemin absolu par rapport au root_path
+      // Correction : Rendre le chemin absolu par rapport au root_path
       if (path == "/") {
         full_path = root_path_; // Définir le chemin complet comme root_path_
       }
@@ -205,21 +209,36 @@ void FTPServer::process_command(int client_socket, const std::string& command) {
   } else if (cmd_str.find("TYPE") == 0) {
     send_response(client_socket, 200, "Type set to " + cmd_str.substr(5));
   } else if (cmd_str.find("PASV") == 0) {
-       if (start_passive_mode(client_socket)) {
-            passive_mode_enabled_ = true;
-        } else {
-            send_response(client_socket, 425, "Can't open passive connection.");
-        }
+    if (start_passive_mode(client_socket)) {
+      passive_mode_enabled_ = true;
+    } else {
+      send_response(client_socket, 425, "Can't open passive connection.");
+    }
   } else if (cmd_str.find("PORT") == 0) {
-    send_response(client_socket, 502, "PORT command not supported yet");
+    // Implémentation du mode actif (PORT)
+    std::string param = cmd_str.substr(5);
+    if (parse_port_command(client_socket, param)) {
+      send_response(client_socket, 200, "PORT command successful");
+    } else {
+      send_response(client_socket, 501, "Invalid PORT command");
+    }
   } else if (cmd_str.find("STOR") == 0) {
     std::string filename = cmd_str.substr(5);
     std::string full_path = client_current_paths_[client_index] + "/" + filename;
+    send_response(client_socket, 150, "Opening connection for file upload");
     start_file_upload(client_socket, full_path);
   } else if (cmd_str.find("RETR") == 0) {
     std::string filename = cmd_str.substr(5);
     std::string full_path = client_current_paths_[client_index] + "/" + filename;
-    start_file_download(client_socket, full_path);
+    struct stat file_stat;
+    if (stat(full_path.c_str(), &file_stat) == 0) {
+      std::string size_msg = "Opening connection for file download (" +
+                              std::to_string(file_stat.st_size) + " bytes)";
+      send_response(client_socket, 150, size_msg);
+      start_file_download(client_socket, full_path);
+    } else {
+      send_response(client_socket, 550, "File not found");
+    }
   } else if (cmd_str.find("SYST") == 0) {
     send_response(client_socket, 215, "UNIX Type: L8");
   } else if (cmd_str.find("FEAT") == 0) {
@@ -260,10 +279,25 @@ bool FTPServer::authenticate(const std::string& username, const std::string& pas
 }
 
 bool FTPServer::start_passive_mode(int client_socket) {
+    // Fermer l'ancien socket de données passives s'il existe
+    if (passive_data_socket_ != -1) {
+        close(passive_data_socket_);
+        passive_data_socket_ = -1;
+    }
+
     // Créer un socket pour la connexion de données en mode passif
     passive_data_socket_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (passive_data_socket_ < 0) {
         ESP_LOGE(TAG, "Failed to create passive data socket");
+        return false;
+    }
+
+    // Activer la réutilisation d'adresse pour le socket
+    int opt = 1;
+    if (setsockopt(passive_data_socket_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        ESP_LOGE(TAG, "Failed to set socket options for passive mode");
+        close(passive_data_socket_);
+        passive_data_socket_ = -1;
         return false;
     }
 
@@ -273,11 +307,14 @@ bool FTPServer::start_passive_mode(int client_socket) {
     data_addr.sin_family = AF_INET;
     data_addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-    // Attribuer un port éphémère au socket de données
-    data_addr.sin_port = htons(0);
+    // Utiliser un port spécifique plutôt qu'un port éphémère
+    // Pour certains clients FTP, un port dans la plage 1024-65535 est plus fiable
+    data_addr.sin_port = htons(port_ + 1);  // Utiliser port+1 pour les données
+
     if (bind(passive_data_socket_, (struct sockaddr *)&data_addr, sizeof(data_addr)) < 0) {
-        ESP_LOGE(TAG, "Failed to bind passive data socket");
+        ESP_LOGE(TAG, "Failed to bind passive data socket: %d", errno);
         close(passive_data_socket_);
+        passive_data_socket_ = -1;
         return false;
     }
 
@@ -285,6 +322,7 @@ bool FTPServer::start_passive_mode(int client_socket) {
     if (listen(passive_data_socket_, 1) < 0) {
         ESP_LOGE(TAG, "Failed to listen on passive data socket");
         close(passive_data_socket_);
+        passive_data_socket_ = -1;
         return false;
     }
 
@@ -294,28 +332,35 @@ bool FTPServer::start_passive_mode(int client_socket) {
     if (getsockname(passive_data_socket_, (struct sockaddr *)&sin, &len) == -1) {
         ESP_LOGE(TAG, "getsockname failed");
         close(passive_data_socket_);
+        passive_data_socket_ = -1;
         return false;
     }
     passive_data_port_ = ntohs(sin.sin_port);
 
-    char ip_str[INET_ADDRSTRLEN];
+    // Obtenir l'adresse IP locale
     esp_netif_t *netif = esp_netif_get_default_netif();
     if (netif == nullptr) {
         ESP_LOGE(TAG, "No netif found");
         close(passive_data_socket_);
+        passive_data_socket_ = -1;
         return false;
     }
+    
     esp_netif_ip_info_t ip_info;
     esp_err_t err = esp_netif_get_ip_info(netif, &ip_info);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to get IP info: %s", esp_err_to_name(err));
         close(passive_data_socket_);
+        passive_data_socket_ = -1;
         return false;
     }
+    
+    // Convertir l'adresse IP en format chaîne
+    char ip_str[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &ip_info.ip.addr, ip_str, INET_ADDRSTRLEN);
+    ESP_LOGI(TAG, "Local IP: %s", ip_str);
 
-
-    // Convertir l'adresse IP en format numérique pour la réponse
+    // Convertir l'adresse IP en format numérique pour la réponse PASV
     std::string ip_address_str = std::string(ip_str);
     std::replace(ip_address_str.begin(), ip_address_str.end(), '.', ',');
 
@@ -323,19 +368,54 @@ bool FTPServer::start_passive_mode(int client_socket) {
     std::string pasv_response = "Entering Passive Mode (" + ip_address_str + "," +
                                 std::to_string(passive_data_port_ / 256) + "," +
                                 std::to_string(passive_data_port_ % 256) + ")";
+    
     send_response(client_socket, 227, pasv_response);
     ESP_LOGI(TAG, "Passive mode started on port %d", passive_data_port_);
+    
+    // Configurer le socket en non-bloquant
+    fcntl(passive_data_socket_, F_SETFL, O_NONBLOCK);
+    
     return true;
 }
 
+bool FTPServer::parse_port_command(int client_socket, const std::string& param) {
+    // À implémenter si nécessaire
+    return false;
+}
+
 int FTPServer::open_data_connection(int client_socket) {
+    if (passive_data_socket_ == -1) {
+        ESP_LOGE(TAG, "No passive data socket available");
+        return -1;
+    }
+
+    // Définir une temporisation pour l'accept
+    struct timeval tv;
+    tv.tv_sec = 5;  // 5 secondes de timeout
+    tv.tv_usec = 0;
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(passive_data_socket_, &readfds);
+    
+    int ret = select(passive_data_socket_ + 1, &readfds, NULL, NULL, &tv);
+    if (ret <= 0) {
+        ESP_LOGE(TAG, "Timeout waiting for data connection");
+        return -1;
+    }
+    
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
     int data_socket = accept(passive_data_socket_, (struct sockaddr *)&client_addr, &client_len);
+    
     if (data_socket < 0) {
-        ESP_LOGE(TAG, "Failed to accept passive data connection");
+        ESP_LOGE(TAG, "Failed to accept passive data connection: %d", errno);
         return -1;
     }
+    
+    // Configurer le socket en mode bloquant pour le transfert de données
+    int flags = fcntl(data_socket, F_GETFL, 0);
+    fcntl(data_socket, F_SETFL, flags & ~O_NONBLOCK);
+    
     ESP_LOGI(TAG, "Passive data connection accepted");
     return data_socket;
 }
@@ -351,22 +431,19 @@ void FTPServer::close_data_connection(int client_socket) {
 }
 
 void FTPServer::list_directory(int client_socket, const std::string& path) {
-        int data_socket = open_data_connection(client_socket);
+    int data_socket = open_data_connection(client_socket);
     if (data_socket < 0) {
         send_response(client_socket, 425, "Can't open data connection.");
-       
         return;
     }
+    
     DIR *dir = opendir(path.c_str());
     if (dir == nullptr) {
-         close(data_socket);
-      close_data_connection(client_socket);
+        close(data_socket);
+        close_data_connection(client_socket);
         send_response(client_socket, 550, "Failed to open directory");
         return;
     }
-
-
-    send_response(client_socket, 150, "Opening ASCII mode data connection for file list");
 
     struct dirent *entry;
     while ((entry = readdir(dir)) != nullptr) {
@@ -402,31 +479,25 @@ void FTPServer::list_directory(int client_socket, const std::string& path) {
     }
 
     closedir(dir);
-        close(data_socket);
+    close(data_socket);
     close_data_connection(client_socket);
     send_response(client_socket, 226, "Directory send OK");
 }
 
 void FTPServer::start_file_upload(int client_socket, const std::string& path) {
-        int data_socket = open_data_connection(client_socket);
+    int data_socket = open_data_connection(client_socket);
     if (data_socket < 0) {
         send_response(client_socket, 425, "Can't open data connection.");
         return;
     }
+    
     int file_fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (file_fd < 0) {
-            close(data_socket);
+        close(data_socket);
         close_data_connection(client_socket);
         send_response(client_socket, 550, "Failed to open file for writing");
         return;
     }
-
-
-    send_response(client_socket, 150, "Opening connection for file upload");
-
-    // Set socket to blocking mode for data transfer
-    int flags = fcntl(client_socket, F_GETFL, 0);
-    fcntl(client_socket, F_SETFL, flags & ~O_NONBLOCK);
 
     char buffer[2048];
     int len;
@@ -435,40 +506,25 @@ void FTPServer::start_file_upload(int client_socket, const std::string& path) {
     }
 
     close(file_fd);
-        close(data_socket);
-        close_data_connection(client_socket);
-
-
-    // Restore non-blocking mode
-    fcntl(client_socket, F_SETFL, flags);
+    close(data_socket);
+    close_data_connection(client_socket);
     send_response(client_socket, 226, "File upload complete");
 }
 
 void FTPServer::start_file_download(int client_socket, const std::string& path) {
-        int data_socket = open_data_connection(client_socket);
+    int data_socket = open_data_connection(client_socket);
     if (data_socket < 0) {
         send_response(client_socket, 425, "Can't open data connection.");
         return;
     }
+    
     int file_fd = open(path.c_str(), O_RDONLY);
     if (file_fd < 0) {
-            close(data_socket);
+        close(data_socket);
         close_data_connection(client_socket);
         send_response(client_socket, 550, "Failed to open file for reading");
         return;
     }
-
-
-    // Get file size
-    struct stat file_stat;
-    fstat(file_fd, &file_stat);
-    std::string size_msg = "Opening connection for file download (" +
-                            std::to_string(file_stat.st_size) + " bytes)";
-    send_response(client_socket, 150, size_msg);
-
-    // Set socket to blocking mode for data transfer
-    int flags = fcntl(client_socket, F_GETFL, 0);
-    fcntl(client_socket, F_SETFL, flags & ~O_NONBLOCK);
 
     char buffer[2048];
     int len;
@@ -477,12 +533,8 @@ void FTPServer::start_file_download(int client_socket, const std::string& path) 
     }
 
     close(file_fd);
-        close(data_socket);
-        close_data_connection(client_socket);
-
-
-    // Restore non-blocking mode
-    fcntl(client_socket, F_SETFL, flags);
+    close(data_socket);
+    close_data_connection(client_socket);
     send_response(client_socket, 226, "File download complete");
 }
 
