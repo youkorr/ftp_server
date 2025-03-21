@@ -1,9 +1,6 @@
 #include "ftp_server.h"
 #include "../sd_mmc_card/sd_mmc_card.h"
 #include "esp_log.h"
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 #include <fcntl.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -192,13 +189,6 @@ void FTPServer::process_command(int client_socket, const std::string& command) {
     } else {
       send_response(client_socket, 425, "Can't open passive connection");
     }
-  } else if (cmd_str.find("PORT") == 0) {
-    std::string param = cmd_str.substr(5);
-    if (parse_port_command(client_socket, param)) {
-      send_response(client_socket, 200, "PORT command successful");
-    } else {
-      send_response(client_socket, 501, "Invalid PORT command");
-    }
   } else if (cmd_str.find("LIST") == 0) {
     std::string path = client_current_paths_[client_index];
     send_response(client_socket, 150, "Opening ASCII mode data connection for file list");
@@ -219,23 +209,6 @@ void FTPServer::process_command(int client_socket, const std::string& command) {
       start_file_download(client_socket, full_path);
     } else {
       send_response(client_socket, 550, "File not found");
-    }
-  } else if (cmd_str.find("SIZE") == 0) {
-    std::string filename = cmd_str.substr(5);
-    std::string full_path = client_current_paths_[client_index] + "/" + filename;
-    struct stat file_stat;
-    if (stat(full_path.c_str(), &file_stat) == 0) {
-      send_response(client_socket, 213, std::to_string(file_stat.st_size));
-    } else {
-      send_response(client_socket, 550, "File not found");
-    }
-  } else if (cmd_str.find("DELE") == 0) {
-    std::string filename = cmd_str.substr(5);
-    std::string full_path = client_current_paths_[client_index] + "/" + filename;
-    if (unlink(full_path.c_str()) == 0) {
-      send_response(client_socket, 250, "File deleted");
-    } else {
-      send_response(client_socket, 550, "Delete operation failed");
     }
   } else if (cmd_str.find("QUIT") == 0) {
     send_response(client_socket, 221, "Goodbye");
@@ -336,30 +309,6 @@ bool FTPServer::start_passive_mode(int client_socket) {
                         std::to_string(passive_data_port_ & 0xFF) + ")";
 
   send_response(client_socket, 227, response);
-  return true;
-}
-
-bool FTPServer::parse_port_command(int client_socket, const std::string& param) {
-  std::vector<int> numbers;
-  size_t start = 0;
-  size_t end = param.find(',');
-  
-  while (end != std::string::npos) {
-    numbers.push_back(std::stoi(param.substr(start, end - start)));
-    start = end + 1;
-    end = param.find(',', start);
-  }
-  numbers.push_back(std::stoi(param.substr(start)));
-
-  if (numbers.size() != 6) {
-    return false;
-  }
-
-  uint16_t port = numbers[4] * 256 + numbers[5];
-  if (port < 1024) {
-    return false;
-  }
-
   return true;
 }
 
@@ -519,7 +468,6 @@ bool FTPServer::is_running() const {
 
 }  // namespace ftp_server
 }  // namespace esphome
-
 
 
 
