@@ -40,6 +40,7 @@ class FTPServer : public Component {
   void send_response(int client_socket, int code, const std::string& message);
   bool authenticate(const std::string& username, const std::string& password);
   void list_directory(int client_socket, const std::string& path);
+  void list_names(int client_socket, const std::string& path);  // Add this line
   void start_file_upload(int client_socket, const std::string& path);
   void start_file_download(int client_socket, const std::string& path);
 
@@ -60,6 +61,9 @@ class FTPServer : public Component {
   int passive_data_port_ = -1;
   std::string passive_client_ip_;
 
+  // Variable pour la commande RNFR
+  std::string rename_from_;  // Add this line
+
   // Méthodes pour le mode passif
   bool start_passive_mode(int client_socket);
   int open_data_connection(int client_socket);
@@ -68,6 +72,12 @@ class FTPServer : public Component {
 
 }  // namespace ftp_server
 }  // namespace esphome
+
+
+
+
+
+
 
 
 
