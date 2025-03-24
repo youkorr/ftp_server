@@ -3,7 +3,7 @@ import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_PASSWORD, CONF_USERNAME, CONF_PORT
 
 DEPENDENCIES = ['network']
-CODEOWNERS = ['@votre_nom']
+CODEOWNERS = ['@youkorr']
 
 # Définir les constantes pour la configuration
 CONF_ROOT_PATH = 'root_path'
