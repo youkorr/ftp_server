@@ -173,12 +173,45 @@ esp_err_t FTPHTTPProxy::http_req_handler(httpd_req_t *req) {
     requested_path.erase(0, 1);
   }
 
-  // Configuration du transfert par lots
-  httpd_resp_set_type(req, "text/plain");
-  
-  // La fonction httpd_resp_set_send_chunked n'existe pas
-  // On utilise directement httpd_resp_send_chunk à la place
+  // Obtenir l'extension du fichier pour déterminer le type MIME
+  std::string extension = "";
+  size_t dot_pos = requested_path.find_last_of('.');
+  if (dot_pos != std::string::npos) {
+    extension = requested_path.substr(dot_pos);
+  }
 
+  // Définir le type MIME approprié
+  if (extension == ".mp3") {
+    httpd_resp_set_type(req, "audio/mpeg");
+  } else if (extension == ".wav") {
+    httpd_resp_set_type(req, "audio/wav");
+  } else if (extension == ".ogg") {
+    httpd_resp_set_type(req, "audio/ogg");
+  } else if (extension == ".pdf") {
+    httpd_resp_set_type(req, "application/pdf");
+  } else if (extension == ".jpg" || extension == ".jpeg") {
+    httpd_resp_set_type(req, "image/jpeg");
+  } else if (extension == ".png") {
+    httpd_resp_set_type(req, "image/png");
+  } else {
+    // Type par défaut pour les fichiers inconnus
+    httpd_resp_set_type(req, "application/octet-stream");
+  }
+
+  // Forcer le téléchargement pour les fichiers audio et autres gros fichiers
+  if (extension == ".mp3" || extension == ".wav" || extension == ".ogg") {
+    // Extraire le nom du fichier de requested_path
+    std::string filename = requested_path;
+    size_t slash_pos = requested_path.find_last_of('/');
+    if (slash_pos != std::string::npos) {
+      filename = requested_path.substr(slash_pos + 1);
+    }
+    
+    // Ajouter l'en-tête Content-Disposition pour forcer le téléchargement
+    std::string header = "attachment; filename=\"" + filename + "\"";
+    httpd_resp_set_hdr(req, "Content-Disposition", header.c_str());
+  }
+  
   for (const auto &configured_path : proxy->remote_paths_) {
     if (requested_path == configured_path) {
       if (proxy->download_file(configured_path, req)) {
