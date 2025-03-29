@@ -21,6 +21,8 @@ class FTPHTTPProxy : public Component {
   void loop() override;
   float get_setup_priority() const override { return esphome::setup_priority::AFTER_WIFI; }
 
+  bool download_file(const std::string &remote_path, httpd_req_t *req);
+  bool download_file_impl(const std::string &remote_path, httpd_req_t *req);
 
  protected:
   std::string ftp_server_;
