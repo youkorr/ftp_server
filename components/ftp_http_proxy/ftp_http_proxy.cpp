@@ -89,6 +89,8 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   int ip[4], port[2]; 
   char buffer[1024]; // Tampon de 1ko pour réception
   int bytes_received;
+  int flag = 1;  // Déplacé avant les goto
+  int rcvbuf = 8192; // Déplacé avant les goto
 
   // Connexion au serveur FTP
   if (!connect_to_ftp()) {
@@ -125,11 +127,9 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   }
 
   // Configuration du socket de données pour être plus robuste
-  int flag = 1;
   setsockopt(data_sock, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
   
   // Augmenter la taille du buffer de réception pour le socket de données
-  int rcvbuf = 8192;
   setsockopt(data_sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
 
   struct sockaddr_in data_addr;
