@@ -30,6 +30,14 @@ bool FTPHTTPProxy::connect_to_ftp() {
     return false;
   }
 
+  // Configuration du socket pour être plus robuste
+  int flag = 1;
+  setsockopt(sock_, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
+  
+  // Augmenter la taille du buffer de réception
+  int rcvbuf = 8192;
+  setsockopt(sock_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+
   struct sockaddr_in server_addr;
   memset(&server_addr, 0, sizeof(server_addr));
   server_addr.sin_family = AF_INET;
@@ -51,19 +59,23 @@ bool FTPHTTPProxy::connect_to_ftp() {
     sock_ = -1;
     return false;
   }
+  buffer[bytes_received] = '\0';
 
   // Authentification
   snprintf(buffer, sizeof(buffer), "USER %s\r\n", username_.c_str());
   send(sock_, buffer, strlen(buffer), 0);
-  recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  buffer[bytes_received] = '\0';
 
   snprintf(buffer, sizeof(buffer), "PASS %s\r\n", password_.c_str());
   send(sock_, buffer, strlen(buffer), 0);
-  recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  buffer[bytes_received] = '\0';
 
   // Mode binaire
   send(sock_, "TYPE I\r\n", 8, 0);
-  recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  buffer[bytes_received] = '\0';
 
   return true;
 }
@@ -80,6 +92,7 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
 
   // Connexion au serveur FTP
   if (!connect_to_ftp()) {
+    ESP_LOGE(TAG, "Échec de connexion FTP");
     goto error;
   }
 
@@ -87,23 +100,37 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   send(sock_, "PASV\r\n", 6, 0);
   bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
   if (bytes_received <= 0 || !strstr(buffer, "227 ")) {
+    ESP_LOGE(TAG, "Erreur en mode passif");
     goto error;
   }
+  buffer[bytes_received] = '\0';
+  ESP_LOGD(TAG, "Réponse PASV: %s", buffer);
 
   // Extraction des données de connexion
   pasv_start = strchr(buffer, '(');
   if (!pasv_start) {
+    ESP_LOGE(TAG, "Format PASV incorrect");
     goto error;
   }
 
   sscanf(pasv_start, "(%d,%d,%d,%d,%d,%d)", &ip[0], &ip[1], &ip[2], &ip[3], &port[0], &port[1]);
   data_port = port[0] * 256 + port[1];
+  ESP_LOGD(TAG, "Port de données: %d", data_port);
 
   // Création du socket de données
   data_sock = ::socket(AF_INET, SOCK_STREAM, 0);
   if (data_sock < 0) {
+    ESP_LOGE(TAG, "Échec de création du socket de données");
     goto error;
   }
+
+  // Configuration du socket de données pour être plus robuste
+  int flag = 1;
+  setsockopt(data_sock, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
+  
+  // Augmenter la taille du buffer de réception pour le socket de données
+  int rcvbuf = 8192;
+  setsockopt(data_sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
 
   struct sockaddr_in data_addr;
   memset(&data_addr, 0, sizeof(data_addr));
@@ -114,38 +141,57 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   );
 
   if (::connect(data_sock, (struct sockaddr *)&data_addr, sizeof(data_addr)) != 0) {
+    ESP_LOGE(TAG, "Échec de connexion au port de données");
     goto error;
   }
 
   // Envoi de la commande RETR
   snprintf(buffer, sizeof(buffer), "RETR %s\r\n", remote_path.c_str());
+  ESP_LOGD(TAG, "Envoi de la commande: %s", buffer);
   send(sock_, buffer, strlen(buffer), 0);
 
   // Vérification de la réponse 150
   bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
   if (bytes_received <= 0 || !strstr(buffer, "150 ")) {
+    ESP_LOGE(TAG, "Fichier non trouvé ou inaccessible");
     goto error;
   }
+  buffer[bytes_received] = '\0';
+  ESP_LOGD(TAG, "Réponse RETR: %s", buffer);
 
-  // Transfert en streaming
+  // Transfert en streaming avec un buffer plus petit pour éviter les problèmes de mémoire
   while (true) {
     bytes_received = recv(data_sock, buffer, sizeof(buffer), 0);
-    if (bytes_received <= 0) break;
-
-    if (httpd_resp_send_chunk(req, buffer, bytes_received) != ESP_OK) {
-      ESP_LOGE(TAG, "Échec d'envoi au client");
+    if (bytes_received <= 0) {
+      if (bytes_received < 0) {
+        ESP_LOGE(TAG, "Erreur de réception des données: %d", errno);
+      }
       break;
     }
+
+    esp_err_t err = httpd_resp_send_chunk(req, buffer, bytes_received);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Échec d'envoi au client: %d", err);
+      goto error;
+    }
+    
+    // Petit délai pour permettre au TCP/IP stack de respirer
+    vTaskDelay(pdMS_TO_TICKS(1));
   }
+
+  // Fermeture du socket de données
+  ::close(data_sock);
+  data_sock = -1;
 
   // Vérification de la réponse finale 226
   bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
   if (bytes_received > 0 && strstr(buffer, "226 ")) {
     success = true;
+    buffer[bytes_received] = '\0';
+    ESP_LOGD(TAG, "Transfert terminé: %s", buffer);
   }
 
   // Fermeture des sockets
-  ::close(data_sock);
   send(sock_, "QUIT\r\n", 6, 0);
   ::close(sock_);
   sock_ = -1;
@@ -173,20 +219,39 @@ esp_err_t FTPHTTPProxy::http_req_handler(httpd_req_t *req) {
     requested_path.erase(0, 1);
   }
 
+  ESP_LOGI(TAG, "Requête reçue: %s", requested_path.c_str());
+
   // Obtenir l'extension du fichier pour déterminer le type MIME
   std::string extension = "";
   size_t dot_pos = requested_path.find_last_of('.');
   if (dot_pos != std::string::npos) {
     extension = requested_path.substr(dot_pos);
+    ESP_LOGD(TAG, "Extension détectée: %s", extension.c_str());
   }
 
-  // Définir le type MIME approprié
+  // Extraire le nom du fichier de requested_path pour l'en-tête Content-Disposition
+  std::string filename = requested_path;
+  size_t slash_pos = requested_path.find_last_of('/');
+  if (slash_pos != std::string::npos) {
+    filename = requested_path.substr(slash_pos + 1);
+  }
+
+  // Définir les types MIME et headers selon le type de fichier
   if (extension == ".mp3") {
-    httpd_resp_set_type(req, "audio/mpeg");
+    httpd_resp_set_type(req, "application/octet-stream");
+    std::string header = "attachment; filename=\"" + filename + "\"";
+    httpd_resp_set_hdr(req, "Content-Disposition", header.c_str());
+    ESP_LOGD(TAG, "Configuré pour téléchargement MP3");
   } else if (extension == ".wav") {
-    httpd_resp_set_type(req, "audio/wav");
+    httpd_resp_set_type(req, "application/octet-stream");
+    std::string header = "attachment; filename=\"" + filename + "\"";
+    httpd_resp_set_hdr(req, "Content-Disposition", header.c_str());
+    ESP_LOGD(TAG, "Configuré pour téléchargement WAV");
   } else if (extension == ".ogg") {
-    httpd_resp_set_type(req, "audio/ogg");
+    httpd_resp_set_type(req, "application/octet-stream");
+    std::string header = "attachment; filename=\"" + filename + "\"";
+    httpd_resp_set_hdr(req, "Content-Disposition", header.c_str());
+    ESP_LOGD(TAG, "Configuré pour téléchargement OGG");
   } else if (extension == ".pdf") {
     httpd_resp_set_type(req, "application/pdf");
   } else if (extension == ".jpg" || extension == ".jpeg") {
@@ -196,33 +261,29 @@ esp_err_t FTPHTTPProxy::http_req_handler(httpd_req_t *req) {
   } else {
     // Type par défaut pour les fichiers inconnus
     httpd_resp_set_type(req, "application/octet-stream");
-  }
-
-  // Forcer le téléchargement pour les fichiers audio et autres gros fichiers
-  if (extension == ".mp3" || extension == ".wav" || extension == ".ogg") {
-    // Extraire le nom du fichier de requested_path
-    std::string filename = requested_path;
-    size_t slash_pos = requested_path.find_last_of('/');
-    if (slash_pos != std::string::npos) {
-      filename = requested_path.substr(slash_pos + 1);
-    }
-    
-    // Ajouter l'en-tête Content-Disposition pour forcer le téléchargement
     std::string header = "attachment; filename=\"" + filename + "\"";
     httpd_resp_set_hdr(req, "Content-Disposition", header.c_str());
+    ESP_LOGD(TAG, "Configuré pour téléchargement générique");
   }
+
+  // Pour traiter les gros fichiers, on ajoute des en-têtes supplémentaires
+  httpd_resp_set_hdr(req, "Accept-Ranges", "bytes");
   
   for (const auto &configured_path : proxy->remote_paths_) {
     if (requested_path == configured_path) {
+      ESP_LOGI(TAG, "Téléchargement du fichier: %s", requested_path.c_str());
       if (proxy->download_file(configured_path, req)) {
+        ESP_LOGI(TAG, "Téléchargement réussi");
         return ESP_OK;
       } else {
+        ESP_LOGE(TAG, "Échec du téléchargement");
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Échec du téléchargement");
         return ESP_FAIL;
       }
     }
   }
 
+  ESP_LOGW(TAG, "Fichier non trouvé: %s", requested_path.c_str());
   httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Fichier non trouvé");
   return ESP_FAIL;
 }
@@ -231,6 +292,13 @@ void FTPHTTPProxy::setup_http_server() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = local_port_;
   config.uri_match_fn = httpd_uri_match_wildcard;
+  
+  // Augmenter les limites pour gérer les grandes requêtes
+  config.recv_wait_timeout = 10;
+  config.send_wait_timeout = 10;
+  config.max_uri_handlers = 8;
+  config.max_resp_headers = 16;
+  config.stack_size = 8192;
 
   if (httpd_start(&server_, &config) != ESP_OK) {
     ESP_LOGE(TAG, "Échec du démarrage du serveur HTTP");
