@@ -93,13 +93,21 @@ bool FTPHTTPProxy::connect_to_ftp() {
   return true;
 }
 
+// Structure pour rendre la fonction de tâche amie de FTPHTTPProxy
+class FTPDownloadTask {
+public:
+  static void run(void *pvParameters) {
+    DownloadParams *params = (DownloadParams *)pvParameters;
+    bool result = params->proxy->download_file_impl(params->remote_path, params->req);
+    params->completed = true;
+    // Libération de la mémoire et fin de la tâche
+    vTaskDelete(NULL);
+  }
+};
+
 // Fonction de tâche FreeRTOS pour le téléchargement FTP
 void download_task_func(void *pvParameters) {
-  DownloadParams *params = (DownloadParams *)pvParameters;
-  bool result = params->proxy->download_file_impl(params->remote_path, params->req);
-  params->completed = true;
-  // Libération de la mémoire et fin de la tâche
-  vTaskDelete(NULL);
+  FTPDownloadTask::run(pvParameters);
 }
 
 // Implémentation réelle du téléchargement
@@ -463,6 +471,13 @@ void FTPHTTPProxy::setup_http_server() {
   httpd_register_uri_handler(server_, &uri_proxy);
   ESP_LOGI(TAG, "Serveur HTTP démarré sur le port %d", local_port_);
 }
+
+// Déclaration d'amitié pour permettre d'accéder aux méthodes protégées
+// depuis la classe FTPDownloadTask
+template<> 
+struct FTPHTTPProxyFriend {
+  friend class FTPDownloadTask;
+};
 
 }  // namespace ftp_http_proxy
 }  // namespace esphome
