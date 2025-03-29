@@ -1,21 +1,41 @@
 #include "ftp_http_proxy.h"
 #include "esp_log.h"
+#include "esp_task_wdt.h"
 #include <lwip/sockets.h>
 #include <netdb.h>
 #include <cstring>
 #include <arpa/inet.h>
+#include <fcntl.h>
 
 static const char *TAG = "ftp_proxy";
 
 namespace esphome {
 namespace ftp_http_proxy {
 
+// Structure pour les paramètres de téléchargement
+struct DownloadParams {
+  FTPHTTPProxy* proxy;
+  std::string remote_path;
+  httpd_req_t* req;
+  bool completed;
+};
+
 void FTPHTTPProxy::setup() {
   ESP_LOGI(TAG, "Initialisation du proxy FTP/HTTP");
+  
+  // Reconfigurer le watchdog pour avoir un timeout plus long
+  esp_task_wdt_config_t wdt_config = {
+    .timeout_ms = 30000,        // 30 secondes timeout
+    .idle_core_mask = (1 << 0)  // Watch CPU 0
+  };
+  esp_task_wdt_reconfigure(&wdt_config);
+  
   this->setup_http_server();
 }
 
-void FTPHTTPProxy::loop() {}
+void FTPHTTPProxy::loop() {
+  // Rien à faire ici, le traitement est dans des tâches séparées
+}
 
 bool FTPHTTPProxy::connect_to_ftp() {
   struct hostent *ftp_host = gethostbyname(ftp_server_.c_str());
@@ -35,7 +55,7 @@ bool FTPHTTPProxy::connect_to_ftp() {
   setsockopt(sock_, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
   
   // Augmenter la taille du buffer de réception
-  int rcvbuf = 32768; // Augmenté à 32 Ko au lieu de 8 Ko
+  int rcvbuf = 32768; // 32 Ko
   setsockopt(sock_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
   
   // Ajouter un timeout plus long pour les connexions
@@ -86,26 +106,43 @@ bool FTPHTTPProxy::connect_to_ftp() {
   return true;
 }
 
-bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *req) {
+// Fonction de tâche FreeRTOS pour le téléchargement FTP
+void download_task_func(void *pvParameters) {
+  DownloadParams *params = (DownloadParams *)pvParameters;
+  bool result = params->proxy->download_file_impl(params->remote_path, params->req);
+  params->completed = true;
+  
+  // Libération de la mémoire et fin de la tâche
+  vTaskDelete(NULL);
+}
+
+// Implémentation réelle du téléchargement
+bool FTPHTTPProxy::download_file_impl(const std::string &remote_path, httpd_req_t *req) {
   // Déclarations en haut pour éviter les goto cross-initialization
   int data_sock = -1;
   bool success = false;
   char *pasv_start = nullptr;
   int data_port = 0;
   int ip[4], port[2]; 
-  char buffer[4096]; // Tampon de 4Ko pour réception au lieu de 1Ko
+  char buffer[4096]; // Tampon de 4Ko pour réception
   int bytes_received;
-  int flag = 1;  // Déplacé avant les goto
-  int rcvbuf = 32768; // Augmenté à 32 Ko au lieu de 8 Ko
+  int flag = 1;
+  int rcvbuf = 32768; // 32 Ko
   struct timeval timeout;
-  timeout.tv_sec = 30;  // 30 secondes
+  timeout.tv_sec = 30;
   timeout.tv_usec = 0;
+
+  // Enregistrer cette tâche avec le watchdog
+  esp_task_wdt_add(NULL);
 
   // Connexion au serveur FTP
   if (!connect_to_ftp()) {
     ESP_LOGE(TAG, "Échec de connexion FTP");
     goto error;
   }
+
+  // Reset du watchdog pendant les opérations longues
+  esp_task_wdt_reset();
 
   // Mode passif
   send(sock_, "PASV\r\n", 6, 0);
@@ -137,13 +174,13 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
 
   // Configuration du socket de données pour être plus robuste
   setsockopt(data_sock, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
-  
-  // Augmenter la taille du buffer de réception pour le socket de données
   setsockopt(data_sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
-  
-  // Définir un timeout pour le socket de données
   setsockopt(data_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
   setsockopt(data_sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+  
+  // Mettre le socket en mode non-bloquant
+  int socket_flags = fcntl(data_sock, F_GETFL, 0);
+  fcntl(data_sock, F_SETFL, socket_flags | O_NONBLOCK);
 
   struct sockaddr_in data_addr;
   memset(&data_addr, 0, sizeof(data_addr));
@@ -154,9 +191,31 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   );
 
   if (::connect(data_sock, (struct sockaddr *)&data_addr, sizeof(data_addr)) != 0) {
-    ESP_LOGE(TAG, "Échec de connexion au port de données");
-    goto error;
+    // Vérifier si l'erreur est EINPROGRESS (normal en mode non-bloquant)
+    if (errno != EINPROGRESS) {
+      ESP_LOGE(TAG, "Échec de connexion au port de données");
+      goto error;
+    }
+    
+    // Attendre que la connexion soit établie avec select()
+    fd_set write_set;
+    FD_ZERO(&write_set);
+    FD_SET(data_sock, &write_set);
+    
+    struct timeval connect_timeout;
+    connect_timeout.tv_sec = 10;
+    connect_timeout.tv_usec = 0;
+    
+    if (select(data_sock + 1, NULL, &write_set, NULL, &connect_timeout) <= 0) {
+      ESP_LOGE(TAG, "Timeout de connexion au port de données");
+      goto error;
+    }
   }
+  
+  // Revenir en mode bloquant pour la suite
+  fcntl(data_sock, F_SETFL, socket_flags);
+
+  esp_task_wdt_reset();
 
   // Envoi de la commande RETR
   snprintf(buffer, sizeof(buffer), "RETR %s\r\n", remote_path.c_str());
@@ -172,29 +231,75 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   buffer[bytes_received] = '\0';
   ESP_LOGD(TAG, "Réponse RETR: %s", buffer);
 
-  // Transfert en streaming avec un buffer plus grand pour gérer les fichiers volumineux
+  // Préparation pour la lecture non-bloquante
+  fd_set read_set;
+  struct timeval tv;
+  
+  // Taille maximale de chunk à traiter en une fois
+  const size_t MAX_CHUNK = 4096;
+  size_t total_processed = 0;
+  
+  // Transfert en streaming avec traitement par chunks
   while (true) {
-    bytes_received = recv(data_sock, buffer, sizeof(buffer), 0);
-    if (bytes_received <= 0) {
-      if (bytes_received < 0) {
-        ESP_LOGE(TAG, "Erreur de réception des données: %d", errno);
+    // Reset du watchdog à chaque itération
+    esp_task_wdt_reset();
+    
+    // Utiliser select pour attendre les données avec un timeout court
+    FD_ZERO(&read_set);
+    FD_SET(data_sock, &read_set);
+    tv.tv_sec = 0;
+    tv.tv_usec = 100000; // 100ms
+    
+    int select_result = select(data_sock + 1, &read_set, NULL, NULL, &tv);
+    
+    if (select_result > 0) {
+      // Des données sont disponibles
+      bytes_received = recv(data_sock, buffer, sizeof(buffer), 0);
+      
+      if (bytes_received <= 0) {
+        if (bytes_received < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+          ESP_LOGE(TAG, "Erreur de réception des données: %d", errno);
+        }
+        break;
       }
+      
+      // Traiter par petits chunks pour éviter de bloquer trop longtemps
+      size_t sent = 0;
+      while (sent < bytes_received) {
+        esp_task_wdt_reset();
+        
+        size_t chunk = std::min(MAX_CHUNK, bytes_received - sent);
+        esp_err_t err = httpd_resp_send_chunk(req, buffer + sent, chunk);
+        
+        if (err != ESP_OK) {
+          ESP_LOGE(TAG, "Échec d'envoi au client: %d", err);
+          goto error;
+        }
+        
+        sent += chunk;
+        total_processed += chunk;
+        
+        // Petit délai entre les chunks
+        vTaskDelay(pdMS_TO_TICKS(10));
+      }
+    } else if (select_result == 0) {
+      // Timeout, continuer la boucle
+      vTaskDelay(pdMS_TO_TICKS(10));
+    } else {
+      // Erreur
+      ESP_LOGE(TAG, "Erreur select: %d", errno);
       break;
     }
-
-    esp_err_t err = httpd_resp_send_chunk(req, buffer, bytes_received);
-    if (err != ESP_OK) {
-      ESP_LOGE(TAG, "Échec d'envoi au client: %d", err);
-      goto error;
-    }
-    
-    // Petit délai pour permettre au TCP/IP stack de respirer
-    vTaskDelay(pdMS_TO_TICKS(5)); // Augmenté à 5ms au lieu de 1ms
   }
+
+  ESP_LOGI(TAG, "Transfert terminé, %d octets traités", total_processed);
 
   // Fermeture du socket de données
   ::close(data_sock);
   data_sock = -1;
+
+  // Reset du watchdog
+  esp_task_wdt_reset();
 
   // Vérification de la réponse finale 226
   bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
@@ -211,9 +316,16 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
 
   // Envoi du chunk final
   httpd_resp_send_chunk(req, NULL, 0);
+  
+  // Désinscrire du watchdog
+  esp_task_wdt_delete(NULL);
+  
   return success;
 
 error:
+  // Désinscrire du watchdog en cas d'erreur
+  esp_task_wdt_delete(NULL);
+  
   if (data_sock != -1) ::close(data_sock);
   if (sock_ != -1) {
     send(sock_, "QUIT\r\n", 6, 0);
@@ -221,6 +333,57 @@ error:
     sock_ = -1;
   }
   return false;
+}
+
+// Point d'entrée pour le téléchargement, lance une tâche séparée
+bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *req) {
+  DownloadParams *params = new DownloadParams{
+    .proxy = this,
+    .remote_path = remote_path,
+    .req = req,
+    .completed = false
+  };
+  
+  // Créer une tâche dédiée avec une pile suffisamment grande
+  TaskHandle_t task_handle = NULL;
+  BaseType_t result = xTaskCreate(
+    download_task_func,
+    "ftp_download",
+    16384,      // Taille de pile augmentée
+    params,     // Paramètres
+    5,          // Priorité
+    &task_handle
+  );
+  
+  if (result != pdPASS) {
+    ESP_LOGE(TAG, "Échec de création de la tâche de téléchargement");
+    delete params;
+    return false;
+  }
+  
+  // Attendre que la tâche soit terminée avec un timeout
+  // Cette approche est meilleure que d'attendre indéfiniment
+  TickType_t start_time = xTaskGetTickCount();
+  const TickType_t max_wait = pdMS_TO_TICKS(300000); // 5 minutes max
+  
+  while (!params->completed) {
+    vTaskDelay(pdMS_TO_TICKS(100));
+    esp_task_wdt_reset(); // Reset du watchdog dans la tâche principale
+    
+    // Vérifier si le timeout est atteint
+    if ((xTaskGetTickCount() - start_time) > max_wait) {
+      ESP_LOGE(TAG, "Timeout de la tâche de téléchargement");
+      if (task_handle != NULL) {
+        vTaskDelete(task_handle);
+      }
+      delete params;
+      return false;
+    }
+  }
+  
+  // Nettoyage
+  delete params;
+  return true;
 }
 
 esp_err_t FTPHTTPProxy::http_req_handler(httpd_req_t *req) {
@@ -309,12 +472,13 @@ void FTPHTTPProxy::setup_http_server() {
   config.uri_match_fn = httpd_uri_match_wildcard;
   
   // Augmenter les limites pour gérer les grandes requêtes
-  config.recv_wait_timeout = 30;  // Augmenté de 10 à 30
-  config.send_wait_timeout = 30;  // Augmenté de 10 à 30
+  config.recv_wait_timeout = 30;  // Augmenté à 30
+  config.send_wait_timeout = 30;  // Augmenté à 30
   config.max_uri_handlers = 8;
   config.max_resp_headers = 16;
-  config.stack_size = 16384;  // Augmenté de 8192 à 16384
+  config.stack_size = 16384;  // Augmenté à 16384
   config.lru_purge_enable = true;  // Activer le mécanisme de purge LRU
+  config.task_priority = 6;        // Priorité plus haute
 
   if (httpd_start(&server_, &config) != ESP_OK) {
     ESP_LOGE(TAG, "Échec du démarrage du serveur HTTP");
