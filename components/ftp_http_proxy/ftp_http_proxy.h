@@ -34,6 +34,7 @@ class FTPHTTPProxy : public Component {
 
   bool connect_to_ftp();
   bool download_file(const std::string &remote_path, httpd_req_t *req);
+  bool download_file_impl(const std::string &remote_path, httpd_req_t *req);
   void setup_http_server();
   static esp_err_t http_req_handler(httpd_req_t *req);
 };
