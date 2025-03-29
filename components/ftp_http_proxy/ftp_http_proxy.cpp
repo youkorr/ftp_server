@@ -35,8 +35,14 @@ bool FTPHTTPProxy::connect_to_ftp() {
   setsockopt(sock_, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
   
   // Augmenter la taille du buffer de réception
-  int rcvbuf = 8192;
+  int rcvbuf = 32768; // Augmenté à 32 Ko au lieu de 8 Ko
   setsockopt(sock_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+  
+  // Ajouter un timeout plus long pour les connexions
+  struct timeval timeout;
+  timeout.tv_sec = 30;  // 30 secondes
+  timeout.tv_usec = 0;
+  setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 
   struct sockaddr_in server_addr;
   memset(&server_addr, 0, sizeof(server_addr));
@@ -87,10 +93,13 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   char *pasv_start = nullptr;
   int data_port = 0;
   int ip[4], port[2]; 
-  char buffer[1024]; // Tampon de 1ko pour réception
+  char buffer[4096]; // Tampon de 4Ko pour réception au lieu de 1Ko
   int bytes_received;
   int flag = 1;  // Déplacé avant les goto
-  int rcvbuf = 8192; // Déplacé avant les goto
+  int rcvbuf = 32768; // Augmenté à 32 Ko au lieu de 8 Ko
+  struct timeval timeout;
+  timeout.tv_sec = 30;  // 30 secondes
+  timeout.tv_usec = 0;
 
   // Connexion au serveur FTP
   if (!connect_to_ftp()) {
@@ -131,6 +140,10 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   
   // Augmenter la taille du buffer de réception pour le socket de données
   setsockopt(data_sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+  
+  // Définir un timeout pour le socket de données
+  setsockopt(data_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+  setsockopt(data_sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
   struct sockaddr_in data_addr;
   memset(&data_addr, 0, sizeof(data_addr));
@@ -159,7 +172,7 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   buffer[bytes_received] = '\0';
   ESP_LOGD(TAG, "Réponse RETR: %s", buffer);
 
-  // Transfert en streaming avec un buffer plus petit pour éviter les problèmes de mémoire
+  // Transfert en streaming avec un buffer plus grand pour gérer les fichiers volumineux
   while (true) {
     bytes_received = recv(data_sock, buffer, sizeof(buffer), 0);
     if (bytes_received <= 0) {
@@ -176,7 +189,7 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
     }
     
     // Petit délai pour permettre au TCP/IP stack de respirer
-    vTaskDelay(pdMS_TO_TICKS(1));
+    vTaskDelay(pdMS_TO_TICKS(5)); // Augmenté à 5ms au lieu de 1ms
   }
 
   // Fermeture du socket de données
@@ -268,6 +281,8 @@ esp_err_t FTPHTTPProxy::http_req_handler(httpd_req_t *req) {
 
   // Pour traiter les gros fichiers, on ajoute des en-têtes supplémentaires
   httpd_resp_set_hdr(req, "Accept-Ranges", "bytes");
+  // Augmenter le timeout pour les connections HTTP
+  httpd_resp_set_hdr(req, "Keep-Alive", "timeout=60, max=1000");
   
   for (const auto &configured_path : proxy->remote_paths_) {
     if (requested_path == configured_path) {
@@ -294,11 +309,12 @@ void FTPHTTPProxy::setup_http_server() {
   config.uri_match_fn = httpd_uri_match_wildcard;
   
   // Augmenter les limites pour gérer les grandes requêtes
-  config.recv_wait_timeout = 10;
-  config.send_wait_timeout = 10;
+  config.recv_wait_timeout = 30;  // Augmenté de 10 à 30
+  config.send_wait_timeout = 30;  // Augmenté de 10 à 30
   config.max_uri_handlers = 8;
   config.max_resp_headers = 16;
-  config.stack_size = 8192;
+  config.stack_size = 16384;  // Augmenté de 8192 à 16384
+  config.lru_purge_enable = true;  // Activer le mécanisme de purge LRU
 
   if (httpd_start(&server_, &config) != ESP_OK) {
     ESP_LOGE(TAG, "Échec du démarrage du serveur HTTP");
