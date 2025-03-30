@@ -35,7 +35,7 @@ bool FTPHTTPProxy::connect_to_ftp() {
   setsockopt(sock_, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
   
   // Augmenter la taille du buffer de réception
-  int rcvbuf = 8192;
+  int rcvbuf = 16384;
   setsockopt(sock_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
 
   struct sockaddr_in server_addr;
@@ -87,7 +87,7 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   char *pasv_start = nullptr;
   int data_port = 0;
   int ip[4], port[2]; 
-  char buffer[1024]; // Tampon de 1ko pour réception
+  char buffer[512]; // Tampon de 1ko pour réception
   int bytes_received;
   int flag = 1;  // Déplacé avant les goto
   int rcvbuf = 16384; // Déplacé avant les goto
@@ -294,8 +294,8 @@ void FTPHTTPProxy::setup_http_server() {
   config.uri_match_fn = httpd_uri_match_wildcard;
   
   // Augmenter les limites pour gérer les grandes requêtes
-  config.recv_wait_timeout = 20;
-  config.send_wait_timeout = 20;
+  config.recv_wait_timeout = 120;
+  config.send_wait_timeout = 120;
   config.max_uri_handlers = 8;
   config.max_resp_headers = 16;
   config.stack_size = 8192;
