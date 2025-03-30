@@ -45,13 +45,29 @@ SdMmc::SdMmc() : mounted_(false), card_(nullptr) {}
 
 void SdMmc::setup() {
   ESP_LOGCONFIG(TAG, "Setting up SD/MMC card...");
+  
+  // Libérer d'abord les GPIO qui peuvent causer des problèmes au démarrage
   if (this->power_ctrl_pin_ != nullptr) {
     this->power_ctrl_pin_->setup();
     this->power_ctrl_pin_->digital_write(true);
     delay(100);
   }
 
+  // Vérifier la compatibilité des broches avec l'ESP32-S3
+  if (this->clk_pin_ == 0 || this->cmd_pin_ == 0 || this->data0_pin_ == 0 || 
+      (!this->mode_1bit_ && (this->data1_pin_ == 0 || this->data2_pin_ == 0 || this->data3_pin_ == 0))) {
+    ESP_LOGE(TAG, "Invalid GPIO pin configuration");
+    this->init_error_ = ErrorCode::ERR_PIN_SETUP;
+    return;
+  }
+
+  // Configuration de l'hôte SDMMC avec des valeurs sécurisées
   sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+  
+  // Réduire la fréquence d'horloge pour améliorer la stabilité
+  host.max_freq_khz = SDMMC_FREQ_DEFAULT;
+  
+  // Configuration du slot avec les broches spécifiées
   sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
   slot_config.clk = static_cast<gpio_num_t>(this->clk_pin_);
   slot_config.cmd = static_cast<gpio_num_t>(this->cmd_pin_);
@@ -62,27 +78,51 @@ void SdMmc::setup() {
     slot_config.d1 = static_cast<gpio_num_t>(this->data1_pin_);
     slot_config.d2 = static_cast<gpio_num_t>(this->data2_pin_);
     slot_config.d3 = static_cast<gpio_num_t>(this->data3_pin_);
+    
+    // Désactiver la protection contre l'écriture sur GPIO12
+    slot_config.flags &= ~SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+  } else {
+    // En mode 1-bit, désactiver explicitement les autres broches de données
+    slot_config.d1 = GPIO_NUM_NC;
+    slot_config.d2 = GPIO_NUM_NC;
+    slot_config.d3 = GPIO_NUM_NC;
   }
 
+  // Configuration du montage avec des paramètres prudents
   esp_vfs_fat_sdmmc_mount_config_t mount_config = {
       .format_if_mount_failed = false,
       .max_files = 5,
       .allocation_unit_size = 16 * 1024
   };
 
+  // Tenter de monter la carte SD/MMC
   sdmmc_card_t *card;
-  esp_err_t ret = esp_vfs_fat_sdmmc_mount("/sdcard", &host, &slot_config, &mount_config, &card);
-
-  if (ret == ESP_ERR_INVALID_STATE) {
-    ESP_LOGW(TAG, "Card is already mounted.  Trying to unmount and retry.");
-    esp_vfs_fat_sdcard_unmount("/sdcard", card);
+  esp_err_t ret = ESP_FAIL;
+  
+  // Essayer jusqu'à 3 fois avec un délai entre les tentatives
+  for (int i = 0; i < 3; i++) {
     ret = esp_vfs_fat_sdmmc_mount("/sdcard", &host, &slot_config, &mount_config, &card);
+    
+    if (ret == ESP_OK) {
+      break;  // Succès, sortir de la boucle
+    } else if (ret == ESP_ERR_INVALID_STATE) {
+      ESP_LOGW(TAG, "Card is already mounted. Trying to unmount and retry.");
+      esp_vfs_fat_sdcard_unmount("/sdcard", card);
+      delay(100);  // Attendre un peu avant de réessayer
+    } else {
+      ESP_LOGW(TAG, "Mount attempt %d failed: %s", i+1, esp_err_to_name(ret));
+      delay(500);  // Attendre plus longtemps avant le prochain essai
+    }
   }
 
-
   if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to mount SD/MMC card: %s", esp_err_to_name(ret));
+    ESP_LOGE(TAG, "Failed to mount SD/MMC card after multiple attempts: %s", esp_err_to_name(ret));
     this->init_error_ = ErrorCode::ERR_MOUNT;
+    
+    // Libération sécurisée des broches en cas d'échec
+    if (this->power_ctrl_pin_ != nullptr) {
+      this->power_ctrl_pin_->digital_write(false);
+    }
     return;
   }
 
@@ -98,6 +138,11 @@ void SdMmc::unmount() {
     esp_vfs_fat_sdcard_unmount("/sdcard", static_cast<sdmmc_card_t *>(this->card_));
     this->mounted_ = false;
     this->card_ = nullptr;
+    
+    // Désactiver l'alimentation après le démontage
+    if (this->power_ctrl_pin_ != nullptr) {
+      this->power_ctrl_pin_->digital_write(false);
+    }
   }
 }
 
@@ -413,8 +458,23 @@ void SdMmc::update_sensors() {
 #endif
 
 #ifdef USE_TEXT_SENSOR
-  LOG_TEXT_SENSOR("  ", "SD Card Type", this->sd_card_type_text_sensor_);
-
+  if (this->sd_card_type_text_sensor_ != nullptr && this->mounted_) {
+    sdmmc_card_t *card = static_cast<sdmmc_card_t *>(this->card_);
+    std::string type;
+    
+    if (card->is_mmc) {
+      type = "MMC";
+    } else {
+      switch (card->sd_scr.sd_spec) {
+        case 0: type = "SD v1.0/v1.1"; break;
+        case 1: type = "SD v2.0"; break;
+        case 2: type = "SD v3.0"; break;
+        default: type = "SD Unknown"; break;
+      }
+    }
+    
+    this->sd_card_type_text_sensor_->publish_state(type);
+  }
 #endif
 }
 
