@@ -107,7 +107,6 @@ class SdMmc : public Component {
 #endif
   void update_sensors();
 
-#endif
 #ifdef USE_ESP_IDF
   std::string sd_card_type() const;
 #endif
