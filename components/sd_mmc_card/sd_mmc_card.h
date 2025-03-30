@@ -106,8 +106,7 @@ class SdMmc : public Component {
   std::vector<FileSizeSensor> file_size_sensors_{};
 #endif
   void update_sensors();
-#ifdef USE_ESP32_FRAMEWORK_ARDUINO
-  std::string sd_card_type_to_string(int) const;
+
 #endif
 #ifdef USE_ESP_IDF
   std::string sd_card_type() const;
