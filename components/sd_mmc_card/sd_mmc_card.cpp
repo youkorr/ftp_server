@@ -73,7 +73,7 @@ void SdMmc::setup() {
   } else {
     slot_config.width = 4;
   }
-  
+  slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
   // Configuration des broches
 #ifdef SOC_SDMMC_USE_GPIO_MATRIX
   slot_config.clk = static_cast<gpio_num_t>(this->clk_pin_);
@@ -90,7 +90,7 @@ void SdMmc::setup() {
     slot_config.d3 = GPIO_NUM_NC;
   }
 #endif
-
+  
   // Tenter de monter la carte SD/MMC
   sdmmc_card_t *card;
   esp_err_t ret = esp_vfs_fat_sdmmc_mount("/sdcard", &host, &slot_config, &mount_config, &card);
