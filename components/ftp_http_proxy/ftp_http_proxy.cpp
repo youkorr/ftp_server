@@ -98,8 +98,8 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
     return false;
   }
    
-  if (/* condition d'erreur */) {
-    heap_caps_free(buffer);
+  if (!buffer) {
+    ESP_LOGE(TAG, "Échec d'allocation mémoire PSRAM");
     return false;
   }
   
