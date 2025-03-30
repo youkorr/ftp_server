@@ -434,18 +434,19 @@ void SdMmc::add_file_size_sensor(sensor::Sensor *sensor, std::string const &path
 #endif
 
 void SdMmc::dump_config() {
-  ESP_LOGCONFIG(TAG, "SD/MMC Card:");
-  ESP_LOGCONFIG(TAG, "  CLK Pin: GPIO%u", this->clk_pin_);
-  ESP_LOGCONFIG(TAG, "  CMD Pin: GPIO%u", this->cmd_pin_);
-  ESP_LOGCONFIG(TAG, "  Data0 Pin: GPIO%u", this->data0_pin_);
-  ESP_LOGCONFIG(TAG, "  Data1 Pin: GPIO%u", this->data1_pin_);
-  ESP_LOGCONFIG(TAG, "  Data2 Pin: GPIO%u", this->data2_pin_);
-  ESP_LOGCONFIG(TAG, "  Data3 Pin: GPIO%u", this->data3_pin_);
-  ESP_LOGCONFIG(TAG, "  Mode 1-bit: %s", this->mode_1bit_ ? "Yes" : "No");
+  ESP_LOGCONFIG(TAG, "SD MMC Component");
+  ESP_LOGCONFIG(TAG, "  Mode 1 bit: %s", TRUEFALSE(this->mode_1bit_));
+  ESP_LOGCONFIG(TAG, "  CLK Pin: %d", this->clk_pin_);
+  ESP_LOGCONFIG(TAG, "  CMD Pin: %d", this->cmd_pin_);
+  ESP_LOGCONFIG(TAG, "  DATA0 Pin: %d", this->data0_pin_);
+  if (!this->mode_1bit_) {
+    ESP_LOGCONFIG(TAG, "  DATA1 Pin: %d", this->data1_pin_);
+    ESP_LOGCONFIG(TAG, "  DATA2 Pin: %d", this->data2_pin_);
+    ESP_LOGCONFIG(TAG, "  DATA3 Pin: %d", this->data3_pin_);
+  }
+
   if (this->power_ctrl_pin_ != nullptr) {
-    ESP_LOGCONFIG(TAG, "  Power Control Pin: GPIO%u", this->power_ctrl_pin_->get_pin());
-  } else {
-    ESP_LOGCONFIG(TAG, "  Power Control Pin: None");
+    LOG_PIN("  Power Ctrl Pin: ", this->power_ctrl_pin_);
   }
 
 #ifdef USE_SENSOR
