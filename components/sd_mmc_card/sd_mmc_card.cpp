@@ -46,80 +46,60 @@ SdMmc::SdMmc() : mounted_(false), card_(nullptr) {}
 void SdMmc::setup() {
   ESP_LOGCONFIG(TAG, "Setting up SD/MMC card...");
   
-  // Libérer d'abord les GPIO qui peuvent causer des problèmes au démarrage
+  // Configuration de l'alimentation si nécessaire
   if (this->power_ctrl_pin_ != nullptr) {
     this->power_ctrl_pin_->setup();
     this->power_ctrl_pin_->digital_write(true);
     delay(100);
   }
 
-  // Vérifier la compatibilité des broches avec l'ESP32-S3
-  if (this->clk_pin_ == 0 || this->cmd_pin_ == 0 || this->data0_pin_ == 0 || 
-      (!this->mode_1bit_ && (this->data1_pin_ == 0 || this->data2_pin_ == 0 || this->data3_pin_ == 0))) {
-    ESP_LOGE(TAG, "Invalid GPIO pin configuration");
-    this->init_error_ = ErrorCode::ERR_PIN_SETUP;
-    return;
-  }
-
-  // Configuration de l'hôte SDMMC avec des valeurs sécurisées
-  sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+  // Configuration du montage
+  esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+      .format_if_mount_failed = false,
+      .max_files = 5,
+      .allocation_unit_size = 16 * 1024
+  };
   
-  // Réduire la fréquence d'horloge pour améliorer la stabilité
+  // Configuration de l'hôte
+  sdmmc_host_t host = SDMMC_HOST_DEFAULT();
   host.max_freq_khz = SDMMC_FREQ_DEFAULT;
   
-  // Configuration du slot avec les broches spécifiées
+  // Configuration du slot
   sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+  
+  // Définir la largeur du bus comme dans l'ancien code
+  if (this->mode_1bit_) {
+    slot_config.width = 1;
+  } else {
+    slot_config.width = 4;
+  }
+  
+  // Configuration des broches
+#ifdef SOC_SDMMC_USE_GPIO_MATRIX
   slot_config.clk = static_cast<gpio_num_t>(this->clk_pin_);
   slot_config.cmd = static_cast<gpio_num_t>(this->cmd_pin_);
   slot_config.d0 = static_cast<gpio_num_t>(this->data0_pin_);
-
-  // Configuration pour le mode 4-bit (parce que mode_1bit est false)
   if (!this->mode_1bit_) {
     slot_config.d1 = static_cast<gpio_num_t>(this->data1_pin_);
     slot_config.d2 = static_cast<gpio_num_t>(this->data2_pin_);
     slot_config.d3 = static_cast<gpio_num_t>(this->data3_pin_);
-    
-    // Désactiver la protection contre l'écriture sur GPIO12
-    slot_config.flags &= ~SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
   } else {
     // En mode 1-bit, désactiver explicitement les autres broches de données
     slot_config.d1 = GPIO_NUM_NC;
     slot_config.d2 = GPIO_NUM_NC;
     slot_config.d3 = GPIO_NUM_NC;
   }
-
-  // Configuration du montage avec des paramètres prudents
-  esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-      .format_if_mount_failed = false,
-      .max_files = 5,
-      .allocation_unit_size = 16 * 1024
-  };
+#endif
 
   // Tenter de monter la carte SD/MMC
   sdmmc_card_t *card;
-  esp_err_t ret = ESP_FAIL;
+  esp_err_t ret = esp_vfs_fat_sdmmc_mount("/sdcard", &host, &slot_config, &mount_config, &card);
   
-  // Essayer jusqu'à 3 fois avec un délai entre les tentatives
-  for (int i = 0; i < 3; i++) {
-    ret = esp_vfs_fat_sdmmc_mount("/sdcard", &host, &slot_config, &mount_config, &card);
-    
-    if (ret == ESP_OK) {
-      break;  // Succès, sortir de la boucle
-    } else if (ret == ESP_ERR_INVALID_STATE) {
-      ESP_LOGW(TAG, "Card is already mounted. Trying to unmount and retry.");
-      esp_vfs_fat_sdcard_unmount("/sdcard", card);
-      delay(100);  // Attendre un peu avant de réessayer
-    } else {
-      ESP_LOGW(TAG, "Mount attempt %d failed: %s", i+1, esp_err_to_name(ret));
-      delay(500);  // Attendre plus longtemps avant le prochain essai
-    }
-  }
-
   if (ret != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to mount SD/MMC card after multiple attempts: %s", esp_err_to_name(ret));
+    ESP_LOGE(TAG, "Failed to mount SD/MMC card: %s", esp_err_to_name(ret));
     this->init_error_ = ErrorCode::ERR_MOUNT;
     
-    // Libération sécurisée des broches en cas d'échec
+    // Libération des broches en cas d'échec
     if (this->power_ctrl_pin_ != nullptr) {
       this->power_ctrl_pin_->digital_write(false);
     }
