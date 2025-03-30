@@ -5,6 +5,12 @@
 #include <functional>
 #include "esphome/core/component.h"
 #include "esphome/core/gpio.h"
+#ifdef USE_TEXT_SENSOR
+#include "esphome/components/text_sensor/text_sensor.h"
+
+#ifdef USE_SENSOR
+#include "esphome/components/sensor/sensor.h"
+#endif
 
 namespace esphome {
 namespace sd_mmc_card {
@@ -52,9 +58,6 @@ class SdMmc : public Component {
 
   void set_memory_unit(MemoryUnits unit) { this->memory_unit_ = unit; }
 
-  void write_file_chunked(const char *path, const uint8_t *buffer, size_t len, const char *mode);
-  void read_file_chunked(const char *path, std::function<bool(const uint8_t *, size_t)> callback);
-
  protected:
   bool mode_1bit_{false};
   bool mounted_{false};
@@ -70,7 +73,12 @@ class SdMmc : public Component {
   int data3_pin_{-1};
   GPIOPin *power_ctrl_pin_{nullptr};
 
+#ifdef USE_SENSOR
+  sensor::Sensor *used_space_sensor_{nullptr};
+  sensor::Sensor *total_space_sensor_{nullptr};
+  sensor::Sensor *free_space_sensor_{nullptr};
   std::vector<std::pair<sensor::Sensor *, std::string>> file_size_sensors_;
+#endif
 };
 
 }  // namespace sd_mmc_card
