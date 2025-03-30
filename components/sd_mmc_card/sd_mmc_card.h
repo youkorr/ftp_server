@@ -52,6 +52,7 @@ class SdMmc : public Component {
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::DATA; }
 
+  // Pin configuration methods
   void set_clk_pin(uint8_t);
   void set_cmd_pin(uint8_t);
   void set_data0_pin(uint8_t);
@@ -61,6 +62,7 @@ class SdMmc : public Component {
   void set_mode_1bit(bool);
   void set_power_ctrl_pin(GPIOPin *);
 
+  // File operations
   void write_file_chunked(const char *path, const uint8_t *buffer, size_t len, const char *mode);
   void write_file(const char *path, const uint8_t *buffer, size_t len);
   void write_file(const char *path, const uint8_t *buffer, size_t len, const char *mode);
@@ -86,15 +88,6 @@ class SdMmc : public Component {
   void set_memory_unit(MemoryUnits unit) { this->memory_unit_ = unit; }
 #endif
 
-  void set_clk_pin(uint8_t);
-  void set_cmd_pin(uint8_t);
-  void set_data0_pin(uint8_t);
-  void set_data1_pin(uint8_t);
-  void set_data2_pin(uint8_t);
-  void set_data3_pin(uint8_t);
-  void set_mode_1bit(bool);
-  void set_power_ctrl_pin(GPIOPin *);
-
 #ifdef USE_TEXT_SENSOR
   void set_sd_card_type_text_sensor(text_sensor::TextSensor *sens) { this->sd_card_type_text_sensor_ = sens; }
 #endif
@@ -106,23 +99,10 @@ class SdMmc : public Component {
 
   std::string error_code_to_string(ErrorCode code);
 
+ private:
   bool mode_1bit_{false};
   bool mounted_{false};
-  void *card_{nullptr};
-  ErrorCode init_error_{ErrorCode::NONE};
-  MemoryUnits memory_unit_{MemoryUnits::MEGABYTES};
-
-
   
-  uint8_t clk_pin_;
-  uint8_t cmd_pin_;
-  uint8_t data0_pin_;
-  uint8_t data1_pin_;
-  uint8_t data2_pin_;
-  uint8_t data3_pin_;
-  bool mode_1bit_;
-  GPIOPin *power_ctrl_pin_{nullptr};
-
 #ifdef USE_SENSOR
   sensor::Sensor *used_space_sensor_{nullptr};
   sensor::Sensor *total_space_sensor_{nullptr};
@@ -133,9 +113,24 @@ class SdMmc : public Component {
 #ifdef USE_TEXT_SENSOR
   text_sensor::TextSensor *sd_card_type_text_sensor_{nullptr};
 #endif
+
+ private:
+   // Pin configurations
+   uint8_t clk_pin_;
+   uint8_t cmd_pin_;
+   uint8_t data0_pin_;
+   uint8_t data1_pin_;
+   uint8_t data2_pin_;
+   uint8_t data3_pin_;
+   GPIOPin* power_ctrl_pin_{nullptr};
+
+   // Error and memory handling
+   ErrorCode init_error_{ErrorCode::NONE};
+   MemoryUnits memory_unit_{MemoryUnits::MEGABYTES};
 };
 
-}  // namespace sd_mmc_card
-}  // namespace esphome
+} // namespace sd_mmc_card
+} // namespace esphome
+
 
 
