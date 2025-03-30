@@ -79,10 +79,7 @@ async def to_code(config):
         power_ctrl = await cg.gpio_pin_expression(config[CONF_POWER_CTRL_PIN])
         cg.add(var.set_power_ctrl_pin(power_ctrl));
 
-    if CORE.using_arduino:
-        if CORE.is_esp32:
-            cg.add_library("FS", None)
-            cg.add_library("SD_MMC", None)
+
 
 
 SD_MMC_PATH_ACTION_SCHEMA = cv.Schema(
