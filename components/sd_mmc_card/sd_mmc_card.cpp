@@ -41,7 +41,7 @@ std::string SdMmc::error_code_to_string(ErrorCode code) {
   }
 }
 
-SdMmc::SdMmc() : mode_1bit_(false), mounted_(false), card_(nullptr) {}
+SdMmc::SdMmc() : mounted_(false), card_(nullptr) {}
 
 void SdMmc::setup() {
   ESP_LOGCONFIG(TAG, "Setting up SD/MMC card...");
@@ -56,6 +56,8 @@ void SdMmc::setup() {
   slot_config.clk = static_cast<gpio_num_t>(this->clk_pin_);
   slot_config.cmd = static_cast<gpio_num_t>(this->cmd_pin_);
   slot_config.d0 = static_cast<gpio_num_t>(this->data0_pin_);
+
+  // Configuration pour le mode 4-bit (parce que mode_1bit est false)
   if (!this->mode_1bit_) {
     slot_config.d1 = static_cast<gpio_num_t>(this->data1_pin_);
     slot_config.d2 = static_cast<gpio_num_t>(this->data2_pin_);
@@ -70,6 +72,14 @@ void SdMmc::setup() {
 
   sdmmc_card_t *card;
   esp_err_t ret = esp_vfs_fat_sdmmc_mount("/sdcard", &host, &slot_config, &mount_config, &card);
+
+  if (ret == ESP_ERR_INVALID_STATE) {
+    ESP_LOGW(TAG, "Card is already mounted.  Trying to unmount and retry.");
+    esp_vfs_fat_sdcard_unmount("/sdcard", card);
+    ret = esp_vfs_fat_sdmmc_mount("/sdcard", &host, &slot_config, &mount_config, &card);
+  }
+
+
   if (ret != ESP_OK) {
     ESP_LOGE(TAG, "Failed to mount SD/MMC card: %s", esp_err_to_name(ret));
     this->init_error_ = ErrorCode::ERR_MOUNT;
@@ -137,104 +147,117 @@ void SdMmc::append_file(const char *path, const uint8_t *buffer, size_t len) {
   this->write_file_chunked(path, buffer, len, "ab");
 }
 
+std::vector<uint8_t> SdMmc::read_file(const char *path) {
+  std::vector<uint8_t> data;
+  if (!this->mounted_ || this->init_error_ != ErrorCode::NONE) return data;
+
+  FILE *file = fopen(path, "rb");
+  if (file == nullptr) {
+    ESP_LOGE(TAG, "Failed to open file %s: %s", path, strerror(errno));
+    return data;
+  }
+
+  fseek(file, 0, SEEK_END);
+  size_t file_size = ftell(file);
+  fseek(file, 0, SEEK_SET);
+
+  data.resize(file_size);
+  size_t read_size = fread(data.data(), 1, file_size, file);
+
+  if (read_size != file_size) {
+    ESP_LOGW(TAG, "Read size %zu does not match file size %zu", read_size, file_size);
+    data.resize(read_size); // Adjust vector size if read was incomplete
+  }
+
+  fclose(file);
+  return data;
+}
+
 void SdMmc::read_file_chunked(const char *path, std::function<bool(const uint8_t *, size_t)> callback) {
   if (!this->mounted_ || this->init_error_ != ErrorCode::NONE) return;
+
   FILE *file = fopen(path, "rb");
   if (file == nullptr) {
     ESP_LOGE(TAG, "Failed to open file %s: %s", path, strerror(errno));
     return;
   }
 
-  uint8_t buffer[16384]; // 16KB chunks
+  uint8_t buffer[16384]; // 16KB buffer
   size_t bytes_read;
+
   while ((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
     if (!callback(buffer, bytes_read)) {
+      ESP_LOGD(TAG, "Callback returned false, stopping read");
       break;
     }
   }
 
   fclose(file);
-}
-
-std::vector<uint8_t> SdMmc::read_file(const char *path) {
-  std::vector<uint8_t> content;
-  if (!this->mounted_ || this->init_error_ != ErrorCode::NONE) return content;
-
-  struct stat st;
-  if (stat(path, &st) != 0) {
-    ESP_LOGE(TAG, "Failed to stat file %s", path);
-    return content;
-  }
-
-  content.reserve(st.st_size);
-  this->read_file_chunked(path, [&content](const uint8_t *chunk, size_t chunk_size) {
-    content.insert(content.end(), chunk, chunk + chunk_size);
-    return true;
-  });
-
-  return content;
 }
 
 bool SdMmc::process_file(const char *path, std::function<bool(const uint8_t *, size_t)> callback, size_t buffer_size) {
-  if (!this->mounted_ || this->init_error_ != ErrorCode::NONE) return false;
+    if (!this->mounted_ || this->init_error_ != ErrorCode::NONE) return false;
 
-  FILE *file = fopen(path, "rb");
-  if (file == nullptr) {
-    ESP_LOGE(TAG, "Failed to open file %s", path);
-    return false;
-  }
-
-  std::vector<uint8_t> buffer(buffer_size);
-  bool result = true;
-
-  while (true) {
-    size_t bytes_read = fread(buffer.data(), 1, buffer.size(), file);
-    if (bytes_read == 0) break;
-    if (!callback(buffer.data(), bytes_read)) {
-      result = false;
-      break;
+    FILE *file = fopen(path, "rb");
+    if (file == nullptr) {
+        ESP_LOGE(TAG, "Failed to open file %s: %s", path, strerror(errno));
+        return false;
     }
-  }
 
-  fclose(file);
-  return result;
+    std::vector<uint8_t> buffer(buffer_size);
+    size_t bytes_read;
+
+    while ((bytes_read = fread(buffer.data(), 1, buffer_size, file)) > 0) {
+        if (!callback(buffer.data(), bytes_read)) {
+            ESP_LOGD(TAG, "Callback returned false, stopping read");
+            fclose(file);
+            return false;
+        }
+    }
+
+    fclose(file);
+    return true;
 }
 
 bool SdMmc::copy_file(const char *source_path, const char *dest_path) {
   if (!this->mounted_ || this->init_error_ != ErrorCode::NONE) return false;
 
-  FILE *src = fopen(source_path, "rb");
-  if (src == nullptr) {
-    ESP_LOGE(TAG, "Failed to open source file %s", source_path);
+  FILE *source_file = fopen(source_path, "rb");
+  if (source_file == nullptr) {
+    ESP_LOGE(TAG, "Failed to open source file %s: %s", source_path, strerror(errno));
     return false;
   }
 
-  FILE *dst = fopen(dest_path, "wb");
-  if (dst == nullptr) {
-    fclose(src);
-    ESP_LOGE(TAG, "Failed to open destination file %s", dest_path);
+  FILE *dest_file = fopen(dest_path, "wb");
+  if (dest_file == nullptr) {
+    ESP_LOGE(TAG, "Failed to open destination file %s: %s", dest_path, strerror(errno));
+    fclose(source_file);
     return false;
   }
 
-  uint8_t buffer[16384]; // 16KB chunks
+  uint8_t buffer[16384]; // 16KB buffer
   size_t bytes_read;
-  bool success = true;
 
-  while ((bytes_read = fread(buffer, 1, sizeof(buffer), src)) > 0) {
-    if (fwrite(buffer, 1, bytes_read, dst) != bytes_read) {
-      success = false;
-      break;
+  while ((bytes_read = fread(buffer, 1, sizeof(buffer), source_file)) > 0) {
+    size_t bytes_written = fwrite(buffer, 1, bytes_read, dest_file);
+    if (bytes_written != bytes_read) {
+      ESP_LOGE(TAG, "Write failed: %s", strerror(errno));
+      fclose(source_file);
+      fclose(dest_file);
+      return false;
     }
   }
 
-  fclose(src);
-  fclose(dst);
-  return success;
+  fclose(source_file);
+  fclose(dest_file);
+  return true;
 }
 
 bool SdMmc::delete_file(const char *path) {
   if (!this->mounted_ || this->init_error_ != ErrorCode::NONE) return false;
-  if (unlink(path) != 0) {
+
+  int result = unlink(path);
+  if (result != 0) {
     ESP_LOGE(TAG, "Failed to delete file %s: %s", path, strerror(errno));
     return false;
   }
@@ -243,7 +266,9 @@ bool SdMmc::delete_file(const char *path) {
 
 bool SdMmc::create_directory(const char *path) {
   if (!this->mounted_ || this->init_error_ != ErrorCode::NONE) return false;
-  if (mkdir(path, 0755) != 0) {
+
+  int result = mkdir(path, 0777);
+  if (result != 0) {
     ESP_LOGE(TAG, "Failed to create directory %s: %s", path, strerror(errno));
     return false;
   }
@@ -252,7 +277,9 @@ bool SdMmc::create_directory(const char *path) {
 
 bool SdMmc::remove_directory(const char *path) {
   if (!this->mounted_ || this->init_error_ != ErrorCode::NONE) return false;
-  if (rmdir(path) != 0) {
+
+  int result = rmdir(path);
+  if (result != 0) {
     ESP_LOGE(TAG, "Failed to remove directory %s: %s", path, strerror(errno));
     return false;
   }
@@ -261,141 +288,198 @@ bool SdMmc::remove_directory(const char *path) {
 
 bool SdMmc::file_exists(const char *path) {
   if (!this->mounted_ || this->init_error_ != ErrorCode::NONE) return false;
-  struct stat st;
-  return stat(path, &st) == 0;
+
+  struct stat buffer;
+  return (stat(path, &buffer) == 0);
 }
 
 size_t SdMmc::file_size(const char *path) {
   if (!this->mounted_ || this->init_error_ != ErrorCode::NONE) return 0;
-  struct stat st;
-  if (stat(path, &st) != 0) {
-    return 0;
+
+  struct stat buffer;
+  if (stat(path, &buffer) == 0) {
+    return buffer.st_size;
   }
-  return st.st_size;
+  return 0;
 }
 
 bool SdMmc::is_directory(const char *path) {
   if (!this->mounted_ || this->init_error_ != ErrorCode::NONE) return false;
-  struct stat st;
-  if (stat(path, &st) != 0) {
-    return false;
+
+  struct stat buffer;
+  if (stat(path, &buffer) == 0 && (buffer.st_mode & S_IFDIR)) {
+    return true;
   }
-  return S_ISDIR(st.st_mode);
+  return false;
 }
 
 std::vector<std::string> SdMmc::list_directory(const char *path, uint8_t depth) {
-  std::vector<std::string> result;
-  if (!this->mounted_ || this->init_error_ != ErrorCode::NONE) return result;
+  std::vector<std::string> entries;
+  if (!this->mounted_ || this->init_error_ != ErrorCode::NONE) return entries;
 
   DIR *dir = opendir(path);
   if (dir == nullptr) {
-    ESP_LOGE(TAG, "Failed to open directory %s", path);
-    return result;
+    ESP_LOGE(TAG, "Failed to open directory %s: %s", path, strerror(errno));
+    return entries;
   }
 
   struct dirent *entry;
   while ((entry = readdir(dir)) != nullptr) {
-    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
-    std::string full_path = std::string(path) + "/" + entry->d_name;
-    result.push_back(full_path);
-    if (depth > 0 && entry->d_type == DT_DIR) {
-      auto subdir = this->list_directory(full_path.c_str(), depth - 1);
-      result.insert(result.end(), subdir.begin(), subdir.end());
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
     }
+    entries.push_back(entry->d_name);
   }
 
   closedir(dir);
-  return result;
+  return entries;
 }
 
 std::vector<FileInfo> SdMmc::list_directory_file_info(const char *path, uint8_t depth) {
-  std::vector<FileInfo> result;
-  this->list_directory_file_info_rec(path, depth, result);
-  return result;
+    std::vector<FileInfo> file_info_list;
+    list_directory_file_info_rec(path, depth, file_info_list);
+    return file_info_list;
 }
 
 void SdMmc::list_directory_file_info_rec(const char *path, uint8_t depth, std::vector<FileInfo> &list) {
-  if (!this->mounted_ || this->init_error_ != ErrorCode::NONE) return;
+    if (!this->mounted_ || this->init_error_ != ErrorCode::NONE) return;
 
-  DIR *dir = opendir(path);
-  if (dir == nullptr) return;
-
-  struct dirent *entry;
-  while ((entry = readdir(dir)) != nullptr) {
-    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
-    std::string full_path = std::string(path) + "/" + entry->d_name;
-    struct stat st;
-    if (stat(full_path.c_str(), &st) != 0) continue;
-    list.emplace_back(full_path, st.st_size, S_ISDIR(st.st_mode));
-    if (depth > 0 && S_ISDIR(st.st_mode)) {
-      this->list_directory_file_info_rec(full_path.c_str(), depth - 1, list);
+    DIR *dir = opendir(path);
+    if (dir == nullptr) {
+        ESP_LOGE(TAG, "Failed to open directory %s: %s", path, strerror(errno));
+        return;
     }
-  }
 
-  closedir(dir);
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        std::string full_path = std::string(path) + "/" + entry->d_name;
+        struct stat buffer;
+        if (stat(full_path.c_str(), &buffer) == 0) {
+            bool is_dir = (buffer.st_mode & S_IFDIR) != 0;
+            list.emplace_back(full_path, buffer.st_size, is_dir);
+
+            if (is_dir && depth > 0) {
+                list_directory_file_info_rec(full_path.c_str(), depth - 1, list);
+            }
+        } else {
+            ESP_LOGW(TAG, "Failed to stat %s: %s", full_path.c_str(), strerror(errno));
+        }
+    }
+
+    closedir(dir);
 }
 
 void SdMmc::update_sensors() {
 #ifdef USE_SENSOR
   if (!this->mounted_ || this->init_error_ != ErrorCode::NONE) return;
 
-  sdmmc_card_t *card = static_cast<sdmmc_card_t *>(this->card_);
-  uint64_t capacity = (uint64_t)card->csd.capacity * card->csd.sector_size;
   FATFS *fs;
-  DWORD fre_clust;
-  if (f_getfree("0:", &fre_clust, &fs) != FR_OK) {
-    ESP_LOGE(TAG, "Failed to get free space");
+  DWORD fre_clust, tot_clust;
+
+  /* Get volume information like total and free space */
+  FRESULT res = f_getfree("/sdcard", &fre_clust, &fs);
+  if (res != FR_OK) {
+    ESP_LOGE(TAG, "f_getfree failed: %d", res);
     return;
   }
 
-  uint64_t free_size = (uint64_t)fre_clust * fs->csize * card->csd.sector_size;
-  uint64_t used_size = capacity - free_size;
+  /* Get total sectors and free sectors */
+  tot_clust = fs->n_fatent - 2;
+  uint64_t total_space_bytes = (uint64_t) tot_clust * fs->csize * 512;
+  uint64_t free_space_bytes = (uint64_t) fre_clust * fs->csize * 512;
+  uint64_t used_space_bytes = total_space_bytes - free_space_bytes;
 
-  if (this->used_space_sensor_ != nullptr) {
-    this->used_space_sensor_->publish_state(convertBytes(used_size, this->memory_unit_));
-  }
   if (this->total_space_sensor_ != nullptr) {
-    this->total_space_sensor_->publish_state(convertBytes(capacity, this->memory_unit_));
+    this->total_space_sensor_->publish_state(convertBytes(total_space_bytes, this->memory_unit_));
   }
   if (this->free_space_sensor_ != nullptr) {
-    this->free_space_sensor_->publish_state(convertBytes(free_size, this->memory_unit_));
+    this->free_space_sensor_->publish_state(convertBytes(free_space_bytes, this->memory_unit_));
+  }
+  if (this->used_space_sensor_ != nullptr) {
+    this->used_space_sensor_->publish_state(convertBytes(used_space_bytes, this->memory_unit_));
   }
 
-  for (auto &sensor : this->file_size_sensors_) {
-    if (sensor.first != nullptr) {
-      size_t size = this->file_size(sensor.second.c_str());
-      sensor.first->publish_state(convertBytes(size, this->memory_unit_));
+    // Update file size sensors
+    for (auto &pair : file_size_sensors_) {
+        sensor::Sensor *sensor = pair.first;
+        const std::string &path = pair.second;
+        size_t file_size_bytes = file_size(path.c_str());
+        sensor->publish_state(convertBytes(file_size_bytes, this->memory_unit_));
     }
-  }
 #endif
 
 #ifdef USE_TEXT_SENSOR
-  LOG_TEXT_SENSOR("  ", "SD Card Type", this->sd_card_type_text_sensor_);
+  if (this->sd_card_type_text_sensor_ != nullptr && this->card_ != nullptr) {
+    switch (((sdmmc_card_t *) this->card_)->card_type) {
+      case SDMMC_CARD_TYPE_SDSC:
+        this->sd_card_type_text_sensor_->publish_state("SDSC");
+        break;
+      case SDMMC_CARD_TYPE_SDHC:
+        this->sd_card_type_text_sensor_->publish_state("SDHC");
+        break;
+      case SDMMC_CARD_TYPE_SDXC:
+        this->sd_card_type_text_sensor_->publish_state("SDXC");
+        break;
+      case SDMMC_CARD_TYPE_MMC:
+        this->sd_card_type_text_sensor_->publish_state("MMC");
+        break;
+      default:
+        this->sd_card_type_text_sensor_->publish_state("Unknown");
+        break;
+    }
+  }
 #endif
 }
 
+void SdMmc::set_clk_pin(uint8_t pin) { this->clk_pin_ = pin; }
+void SdMmc::set_cmd_pin(uint8_t pin) { this->cmd_pin_ = pin; }
+void SdMmc::set_data0_pin(uint8_t pin) { this->data0_pin_ = pin; }
+void SdMmc::set_data1_pin(uint8_t pin) { this->data1_pin_ = pin; }
+void SdMmc::set_data2_pin(uint8_t pin) { this->data2_pin_ = pin; }
+void SdMmc::set_data3_pin(uint8_t pin) { this->data3_pin_ = pin; }
+void SdMmc::set_mode_1bit(bool mode) { this->mode_1bit_ = mode; }
+void SdMmc::set_power_ctrl_pin(GPIOPin *pin) { this->power_ctrl_pin_ = pin; }
+
 #ifdef USE_SENSOR
 void SdMmc::add_file_size_sensor(sensor::Sensor *sensor, std::string const &path) {
-  this->file_size_sensors_.emplace_back(sensor, path);
+    file_size_sensors_.push_back({sensor, path});
 }
 #endif
 
 void SdMmc::dump_config() {
   ESP_LOGCONFIG(TAG, "SD/MMC Card:");
-  ESP_LOGCONFIG(TAG, "  CLK Pin: %d", this->clk_pin_);
-  ESP_LOGCONFIG(TAG, "  CMD Pin: %d", this->cmd_pin_);
-  ESP_LOGCONFIG(TAG, "  Data Pins: %d,%d,%d,%d", 
-               this->data0_pin_, this->data1_pin_, 
-               this->data2_pin_, this->data3_pin_);
-  ESP_LOGCONFIG(TAG, "  Mode: %s", this->mode_1bit_ ? "1-bit" : "4-bit");
-  
-  if (this->is_failed()) {
-    ESP_LOGCONFIG(TAG, "  Status: %s", this->error_code_to_string(this->init_error_).c_str());
+  ESP_LOGCONFIG(TAG, "  CLK Pin: GPIO%u", this->clk_pin_);
+  ESP_LOGCONFIG(TAG, "  CMD Pin: GPIO%u", this->cmd_pin_);
+  ESP_LOGCONFIG(TAG, "  Data0 Pin: GPIO%u", this->data0_pin_);
+  ESP_LOGCONFIG(TAG, "  Data1 Pin: GPIO%u", this->data1_pin_);
+  ESP_LOGCONFIG(TAG, "  Data2 Pin: GPIO%u", this->data2_pin_);
+  ESP_LOGCONFIG(TAG, "  Data3 Pin: GPIO%u", this->data3_pin_);
+  ESP_LOGCONFIG(TAG, "  Mode 1-bit: %s", this->mode_1bit_ ? "Yes" : "No");
+  if (this->power_ctrl_pin_ != nullptr) {
+    ESP_LOGCONFIG(TAG, "  Power Control Pin: GPIO%u", this->power_ctrl_pin_->get_pin());
   } else {
-    ESP_LOGCONFIG(TAG, "  Status: Initialized");
+    ESP_LOGCONFIG(TAG, "  Power Control Pin: None");
   }
+
+#ifdef USE_SENSOR
+  ESP_LOGCONFIG(TAG, "  Total Space Sensor: %s", this->total_space_sensor_ != nullptr ? "Yes" : "No");
+  ESP_LOGCONFIG(TAG, "  Free Space Sensor: %s", this->free_space_sensor_ != nullptr ? "Yes" : "No");
+  ESP_LOGCONFIG(TAG, "  Used Space Sensor: %s", this->used_space_sensor_ != nullptr ? "Yes" : "No");
+  ESP_LOGCONFIG(TAG, "  File Size Sensors: %zu", file_size_sensors_.size());
+#endif
+
+#ifdef USE_TEXT_SENSOR
+  ESP_LOGCONFIG(TAG, "  SD Card Type Text Sensor: %s", this->sd_card_type_text_sensor_ != nullptr ? "Yes" : "No");
+#endif
+
+  ESP_LOGCONFIG(TAG, "  Error State: %s", error_code_to_string(this->init_error_).c_str());
 }
 
 }  // namespace sd_mmc_card
 }  // namespace esphome
+
 
