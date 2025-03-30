@@ -465,7 +465,7 @@ void SdMmc::update_sensors() {
     if (card->is_mmc) {
       type = "MMC";
     } else {
-      switch (card->sd_scr.sd_spec) {
+      switch (card->csd.sd_spec) { 
         case 0: type = "SD v1.0/v1.1"; break;
         case 1: type = "SD v2.0"; break;
         case 2: type = "SD v3.0"; break;
