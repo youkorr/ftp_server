@@ -97,20 +97,12 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
     ESP_LOGE(TAG, "Échec d'allocation mémoire PSRAM");
     return false;
   }
-  
-  // Le reste de votre code utilisant buffer
-  
-  // N'oubliez pas de libérer la mémoire avant chaque return
+   
   if (/* condition d'erreur */) {
     heap_caps_free(buffer);
     return false;
   }
   
-  // Avant la fin de la fonction
-  heap_caps_free(buffer);
-  return success;
-}
-
   // Connexion au serveur FTP
   if (!connect_to_ftp()) {
     ESP_LOGE(TAG, "Échec de connexion FTP");
