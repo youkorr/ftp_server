@@ -79,6 +79,9 @@ class SdMmc : public Component {
   sensor::Sensor *free_space_sensor_{nullptr};
   std::vector<std::pair<sensor::Sensor *, std::string>> file_size_sensors_;
 #endif
+#ifdef USE_TEXT_SENSOR
+  SUB_TEXT_SENSOR(sd_card_type)
+#endif
 };
 
 }  // namespace sd_mmc_card
