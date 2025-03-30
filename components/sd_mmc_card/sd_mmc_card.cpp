@@ -458,23 +458,7 @@ void SdMmc::update_sensors() {
 #endif
 
 #ifdef USE_TEXT_SENSOR
-  if (this->sd_card_type_text_sensor_ != nullptr && this->mounted_) {
-    sdmmc_card_t *card = static_cast<sdmmc_card_t *>(this->card_);
-    std::string type;
-    
-    if (card->is_mmc) {
-      type = "MMC";
-    } else {
-      switch (card->csd.sd_spec) { 
-        case 0: type = "SD v1.0/v1.1"; break;
-        case 1: type = "SD v2.0"; break;
-        case 2: type = "SD v3.0"; break;
-        default: type = "SD Unknown"; break;
-      }
-    }
-    
-    this->sd_card_type_text_sensor_->publish_state(type);
-  }
+  LOG_TEXT_SENSOR("  ", "SD Card Type", this->sd_card_type_text_sensor_);
 #endif
 }
 
