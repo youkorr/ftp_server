@@ -87,10 +87,29 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   char *pasv_start = nullptr;
   int data_port = 0;
   int ip[4], port[2]; 
-  char buffer[1024]; // Tampon de 1ko pour réception
   int bytes_received;
   int flag = 1;  // Déplacé avant les goto
   int rcvbuf = 8192; // Déplacé avant les goto
+  
+  // Allouer le buffer dans la PSRAM au lieu de la pile
+  char* buffer = (char*)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM); // Buffer plus grand (4Ko)
+  if (!buffer) {
+    ESP_LOGE(TAG, "Échec d'allocation mémoire PSRAM");
+    return false;
+  }
+  
+  // Le reste de votre code utilisant buffer
+  
+  // N'oubliez pas de libérer la mémoire avant chaque return
+  if (/* condition d'erreur */) {
+    heap_caps_free(buffer);
+    return false;
+  }
+  
+  // Avant la fin de la fonction
+  heap_caps_free(buffer);
+  return success;
+}
 
   // Connexion au serveur FTP
   if (!connect_to_ftp()) {
