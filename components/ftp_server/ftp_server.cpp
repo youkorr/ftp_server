@@ -149,36 +149,18 @@ void FTPServer::handle_new_clients() {
 }
 
 void FTPServer::handle_ftp_client(int client_socket) {
-  fd_set readfds;
-  FD_ZERO(&readfds);
-  FD_SET(client_socket, &readfds);
-
-  struct timeval timeout;
-  timeout.tv_sec = 1;
-  timeout.tv_usec = 0;
-
-  int ret = select(client_socket + 1, &readfds, nullptr, nullptr, &timeout);
-  if (ret > 0) {
-    char buffer[512];
-    int len = recv(client_socket, buffer, sizeof(buffer) - 1, MSG_DONTWAIT);
-    if (len > 0) {
-      buffer[len] = '\0';
-      std::string command(buffer);
-      process_command(client_socket, command);
-    } else if (len == 0) {
-      ESP_LOGI(TAG, "FTP client disconnected");
-      close(client_socket);
-      remove_client(client_socket);
-    } else if (errno != EWOULDBLOCK && errno != EAGAIN) {
-      ESP_LOGW(TAG, "Socket error: %d", errno);
-    }
-  } else if (ret == 0) {
-    ESP_LOGW(TAG, "Socket timeout");
-  } else {
-    ESP_LOGE(TAG, "Select error: %d", errno);
+  char buffer[512];
+  int len = recv(client_socket, buffer, sizeof(buffer) - 1, MSG_DONTWAIT);
+  if (len > 0) {
+    buffer[len] = '\0';
+    std::string command(buffer);
+    process_command(client_socket, command);
+  } else if (len == 0) {
+    ESP_LOGI(TAG, "FTP client disconnected");
+    remove_client(client_socket);
+  } else if (errno != EWOULDBLOCK && errno != EAGAIN) {
+    ESP_LOGW(TAG, "Socket error: %d", errno);
   }
-
-  vTaskDelay(pdMS_TO_TICKS(10));  // Yield control
 }
 
 void FTPServer::process_command(int client_socket, const std::string& command) {
@@ -450,7 +432,6 @@ void FTPServer::process_command(int client_socket, const std::string& command) {
     send_response(client_socket, 200, "NOOP command successful");
   } else if (cmd_str.find("QUIT") == 0) {
     send_response(client_socket, 221, "Goodbye");
-    close(client_socket);
     remove_client(client_socket);
   } else {
     send_response(client_socket, 502, "Command not implemented");
@@ -702,6 +683,19 @@ void FTPServer::start_file_download(int client_socket, const std::string& path) 
 
 bool FTPServer::is_running() const {
   return ftp_server_socket_ != -1;
+}
+
+// Definition of remove_client function
+void FTPServer::remove_client(int client_socket) {
+  auto it = std::find(client_sockets_.begin(), client_sockets_.end(), client_socket);
+  if (it != client_sockets_.end()) {
+    size_t index = it - client_sockets_.begin();
+    client_sockets_.erase(it);
+    client_states_.erase(client_states_.begin() + index);
+    client_usernames_.erase(client_usernames_.begin() + index);
+    client_current_paths_.erase(client_current_paths_.begin() + index);
+  }
+  close(client_socket);
 }
 
 }  // namespace ftp_server
