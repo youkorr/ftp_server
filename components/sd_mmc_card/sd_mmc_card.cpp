@@ -370,20 +370,7 @@ void SdMmc::update_sensors() {
 #endif
 
 #ifdef USE_TEXT_SENSOR
-  if (this->sd_card_type_text_sensor_ != nullptr) {
-    sdmmc_card_t *card = static_cast<sdmmc_card_t*>(this->card_);
-    const char *type = "UNKNOWN";
-    
-    if (card->is_mmc) {
-      type = "MMC";
-    } else if (card->ocr & SD_OCR_CARD_CAPACITY) {
-      type = "SDHC/SDXC";
-    } else {
-      type = "SDSC";
-    }
-    
-    this->sd_card_type_text_sensor_->publish_state(type);
-  }
+  LOG_TEXT_SENSOR("  ", "SD Card Type", this->sd_card_type_text_sensor_);
 #endif
 }
 
