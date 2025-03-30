@@ -22,7 +22,7 @@ class FTPServer : public Component {
   void loop() override;
   void dump_config() override;
 
-  void remove_client(int client_socket);
+  
 
   // Définir une priorité d'initialisation tardive pour ESP-IDF
   float get_setup_priority() const override { return setup_priority::LATE - 1; }
