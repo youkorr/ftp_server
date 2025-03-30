@@ -87,10 +87,11 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   char *pasv_start = nullptr;
   int data_port = 0;
   int ip[4], port[2]; 
+  char buffer[1024]; // Tampon de 1ko pour réception
   int bytes_received;
   int flag = 1;  // Déplacé avant les goto
   int rcvbuf = 8192; // Déplacé avant les goto
-  
+
   // Connexion au serveur FTP
   if (!connect_to_ftp()) {
     ESP_LOGE(TAG, "Échec de connexion FTP");
