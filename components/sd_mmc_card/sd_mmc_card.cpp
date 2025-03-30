@@ -263,6 +263,47 @@ bool SdMmc::copy_file(const char *source_path, const char *dest_path) {
   return success;
 }
 
+// Méthode pour supprimer un fichier
+bool SdMmc::delete_file(const char *path) {
+  ESP_LOGI(TAG, "Deleting file: %s", path);
+  
+  if (this->is_failed())
+    return false;
+  
+  // Vérifier si le fichier existe avant de tenter de le supprimer
+  if (!this->file_exists(path)) {
+    ESP_LOGW(TAG, "File %s does not exist", path);
+    return false;
+  }
+  
+  // Utiliser la fonction remove() pour supprimer le fichier
+  if (remove(path) != 0) {
+    ESP_LOGE(TAG, "Failed to delete file %s: %s", path, strerror(errno));
+    return false;
+  }
+  
+  ESP_LOGI(TAG, "Successfully deleted file %s", path);
+  
+  // Mettre à jour les capteurs après la suppression du fichier
+  this->update_sensors();
+  
+  return true;
+}
+
+// Méthode auxiliaire pour vérifier si un fichier existe
+bool SdMmc::file_exists(const char *path) {
+  if (this->is_failed())
+    return false;
+    
+  FILE *f = fopen(path, "r");
+  if (f == nullptr) {
+    return false;
+  }
+  
+  fclose(f);
+  return true;
+}
+
 // Méthode pour initialiser la carte SD avec des paramètres optimisés pour la vitesse
 void SdMmc::setup() {
   // Configurer SD_MMC pour la vitesse maximale supportée par le matériel
@@ -351,8 +392,6 @@ void SdMmc::loop() {
   }
 }
 
-// Reste du code inchangé...
-// ...
 
 }  // namespace sd_mmc_card
 }  // namespace esphome
