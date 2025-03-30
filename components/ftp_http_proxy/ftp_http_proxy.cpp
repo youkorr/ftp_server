@@ -87,7 +87,7 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   char *pasv_start = nullptr;
   int data_port = 0;
   int ip[4], port[2]; 
-  char buffer[512]; // Tampon de 1ko pour réception
+  char buffer[1024]; // Tampon de 1ko pour réception
   int bytes_received;
   int flag = 1;  // Déplacé avant les goto
   int rcvbuf = 16384; // Déplacé avant les goto
