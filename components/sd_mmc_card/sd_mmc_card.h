@@ -14,10 +14,6 @@
 #include "esphome/components/text_sensor/text_sensor.h"
 #endif
 
-#ifdef USE_ESP_IDF
-#include "sdmmc_cmd.h"
-#endif
-
 namespace esphome {
 namespace sd_mmc_card {
 
@@ -157,14 +153,6 @@ class SdMmc : public Component {
   // Internal methods
   void list_directory_file_info_rec(const char *path, uint8_t depth, std::vector<FileInfo> &list);
   
-#ifdef USE_ESP32_FRAMEWORK_ARDUINO
-  std::string sd_card_type_to_string(int type) const;
-#endif
-#ifdef USE_ESP_IDF
-  std::string sd_card_type() const;
-  sdmmc_card_t *card_{nullptr};
-#endif
-
   // Member variables
   uint8_t clk_pin_;
   uint8_t cmd_pin_;
