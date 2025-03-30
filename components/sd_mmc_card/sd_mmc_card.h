@@ -86,6 +86,15 @@ class SdMmc : public Component {
   void set_memory_unit(MemoryUnits unit) { this->memory_unit_ = unit; }
 #endif
 
+  void set_clk_pin(uint8_t);
+  void set_cmd_pin(uint8_t);
+  void set_data0_pin(uint8_t);
+  void set_data1_pin(uint8_t);
+  void set_data2_pin(uint8_t);
+  void set_data3_pin(uint8_t);
+  void set_mode_1bit(bool);
+  void set_power_ctrl_pin(GPIOPin *);
+
 #ifdef USE_TEXT_SENSOR
   void set_sd_card_type_text_sensor(text_sensor::TextSensor *sens) { this->sd_card_type_text_sensor_ = sens; }
 #endif
@@ -103,12 +112,15 @@ class SdMmc : public Component {
   ErrorCode init_error_{ErrorCode::NONE};
   MemoryUnits memory_unit_{MemoryUnits::MEGABYTES};
 
-  int clk_pin_{-1};
-  int cmd_pin_{-1};
-  int data0_pin_{-1};
-  int data1_pin_{-1};
-  int data2_pin_{-1};
-  int data3_pin_{-1};
+
+  ErrorCode init_error_;
+  uint8_t clk_pin_;
+  uint8_t cmd_pin_;
+  uint8_t data0_pin_;
+  uint8_t data1_pin_;
+  uint8_t data2_pin_;
+  uint8_t data3_pin_;
+  bool mode_1bit_;
   GPIOPin *power_ctrl_pin_{nullptr};
 
 #ifdef USE_SENSOR
