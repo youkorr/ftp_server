@@ -5,8 +5,10 @@
 #include <functional>
 #include "esphome/core/component.h"
 #include "esphome/core/gpio.h"
+
 #ifdef USE_TEXT_SENSOR
 #include "esphome/components/text_sensor/text_sensor.h"
+#endif
 
 #ifdef USE_SENSOR
 #include "esphome/components/sensor/sensor.h"
@@ -78,12 +80,14 @@ class SdMmc : public Component {
   sensor::Sensor *total_space_sensor_{nullptr};
   sensor::Sensor *free_space_sensor_{nullptr};
   std::vector<std::pair<sensor::Sensor *, std::string>> file_size_sensors_;
+#endif
 
 #ifdef USE_TEXT_SENSOR
-  SUB_TEXT_SENSOR(sd_card_type)
+  text_sensor::TextSensor *sd_card_type_{nullptr};
 #endif
 };
 
 }  // namespace sd_mmc_card
 }  // namespace esphome
+
 
