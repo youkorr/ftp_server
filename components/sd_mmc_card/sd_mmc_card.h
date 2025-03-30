@@ -113,7 +113,7 @@ class SdMmc : public Component {
   MemoryUnits memory_unit_{MemoryUnits::MEGABYTES};
 
 
-  ErrorCode init_error_;
+  
   uint8_t clk_pin_;
   uint8_t cmd_pin_;
   uint8_t data0_pin_;
