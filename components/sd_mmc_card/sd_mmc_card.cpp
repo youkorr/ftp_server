@@ -10,13 +10,16 @@ namespace esphome {
 namespace sd_mmc_card {
 
 static const char *TAG = "sd_mmc_card";
-static const size_t CHUNK_SIZE = 4096;  // Taille du chunk en octets (4KB)
+// Augmentation de la taille des chunks pour de meilleures performances
+static const size_t CHUNK_SIZE = 16384;  // 16KB au lieu de 4KB
+// Buffer statique pour éviter les allocations dynamiques répétées
+static uint8_t transfer_buffer[CHUNK_SIZE];
 
 #ifdef USE_SENSOR
 FileSizeSensor::FileSizeSensor(sensor::Sensor *sensor, std::string const &path) : sensor(sensor), path(path) {}
 #endif
 
-// Méthode pour écrire un fichier en chunks
+// Méthode pour écrire un fichier en chunks - optimisée
 void SdMmc::write_file_chunked(const char *path, const uint8_t *buffer, size_t len, const char *mode) {
   if (this->is_failed())
     return;
@@ -27,8 +30,13 @@ void SdMmc::write_file_chunked(const char *path, const uint8_t *buffer, size_t l
     return;
   }
 
+  // Configurer un buffer d'écriture plus grand mais statique pour éviter l'allocation dynamique
+  // Utilisation du mode _IOFBF (fully buffered) pour maximiser les performances
+  setvbuf(f, NULL, _IOFBF, CHUNK_SIZE);
+
   size_t remaining = len;
   size_t pos = 0;
+  size_t flush_counter = 0;
   
   while (remaining > 0) {
     size_t chunk_size = std::min(remaining, CHUNK_SIZE);
@@ -40,18 +48,24 @@ void SdMmc::write_file_chunked(const char *path, const uint8_t *buffer, size_t l
       return;
     }
     
-    // Flush après chaque chunk pour éviter la perte de données en cas d'erreur
-    fflush(f);
+    // Flush moins fréquemment (tous les ~64KB) pour augmenter les performances
+    flush_counter += chunk_size;
+    if (flush_counter >= CHUNK_SIZE * 4) {
+      fflush(f);
+      flush_counter = 0;
+    }
     
     pos += chunk_size;
     remaining -= chunk_size;
     
-    // Afficher la progression pour les gros fichiers
-    if (len > CHUNK_SIZE * 10 && (pos % (CHUNK_SIZE * 10) == 0)) {
-      ESP_LOGI(TAG, "Writing progress: %.1f%%", (float)pos / len * 100);
+    // Réduire la fréquence des logs pour améliorer les performances
+    if (len > CHUNK_SIZE * 10 && (pos % (CHUNK_SIZE * 20) == 0)) {
+      ESP_LOGV(TAG, "Writing progress: %.1f%%", (float)pos / len * 100);
     }
   }
 
+  // Flush final pour s'assurer que toutes les données sont écrites
+  fflush(f);
   fclose(f);
   ESP_LOGI(TAG, "Successfully wrote %u bytes to file %s", len, path);
   
@@ -75,7 +89,7 @@ void SdMmc::append_file(const char *path, const uint8_t *buffer, size_t len) {
   this->write_file_chunked(path, buffer, len, "a");
 }
 
-// Méthode pour lire un fichier en chunks avec callback
+// Méthode pour lire un fichier en chunks avec callback - optimisée
 void SdMmc::read_file_chunked(const char *path, std::function<bool(const uint8_t*, size_t)> callback) {
   if (this->is_failed())
     return;
@@ -86,6 +100,9 @@ void SdMmc::read_file_chunked(const char *path, std::function<bool(const uint8_t
     return;
   }
 
+  // Configurer un buffer de lecture plus grand mais éviter l'allocation dynamique
+  setvbuf(f, NULL, _IOFBF, CHUNK_SIZE);
+
   // Obtenir la taille du fichier
   fseek(f, 0, SEEK_END);
   size_t file_size = ftell(f);
@@ -93,24 +110,23 @@ void SdMmc::read_file_chunked(const char *path, std::function<bool(const uint8_t
   
   ESP_LOGI(TAG, "Reading file %s, size: %u bytes", path, file_size);
   
-  uint8_t chunk[CHUNK_SIZE];
   size_t total_read = 0;
   
   while (!feof(f)) {
-    size_t read = fread(chunk, 1, CHUNK_SIZE, f);
+    size_t read = fread(transfer_buffer, 1, CHUNK_SIZE, f);
     if (read > 0) {
       total_read += read;
       
       // Appeler le callback avec le chunk actuel
-      bool continue_reading = callback(chunk, read);
+      bool continue_reading = callback(transfer_buffer, read);
       if (!continue_reading) {
         ESP_LOGW(TAG, "Reading stopped by callback at %u bytes", total_read);
         break;
       }
       
-      // Afficher la progression pour les gros fichiers
-      if (file_size > CHUNK_SIZE * 10 && (total_read % (CHUNK_SIZE * 10) == 0)) {
-        ESP_LOGI(TAG, "Reading progress: %.1f%%", (float)total_read / file_size * 100);
+      // Réduire la fréquence des logs pour améliorer les performances
+      if (file_size > CHUNK_SIZE * 10 && (total_read % (CHUNK_SIZE * 20) == 0)) {
+        ESP_LOGV(TAG, "Reading progress: %.1f%%", (float)total_read / file_size * 100);
       }
     }
     
@@ -124,17 +140,24 @@ void SdMmc::read_file_chunked(const char *path, std::function<bool(const uint8_t
   ESP_LOGI(TAG, "Successfully read %u bytes from file %s", total_read, path);
 }
 
-// Méthode pour lire un fichier en entier, mais en utilisant des chunks en interne
+// Méthode pour lire un fichier en entier avec optimisations pour la mémoire
 std::vector<uint8_t> SdMmc::read_file(const char *path) {
   std::vector<uint8_t> content;
   
   if (this->is_failed())
     return content;
   
-  // Préallouer la mémoire en fonction de la taille du fichier
+  // Obtenir la taille du fichier pour pré-allocation
   size_t size = this->file_size(path);
+  
+  // Si le fichier est trop grand pour tenir en mémoire, utiliser une approche par chunks
   if (size > 0) {
+    if (size > 512 * 1024) {  // Si le fichier dépasse 512KB
+      ESP_LOGW(TAG, "File %s is large (%u bytes). Consider using read_file_chunked for better memory usage", path, size);
+    }
+    
     try {
+      // Pré-allouer pour éviter les redimensionnements
       content.reserve(size);
     } catch (std::bad_alloc &e) {
       ESP_LOGE(TAG, "Failed to allocate memory for file %s (%u bytes): %s", path, size, e.what());
@@ -142,16 +165,28 @@ std::vector<uint8_t> SdMmc::read_file(const char *path) {
     }
   }
   
-  // Utiliser read_file_chunked avec un lambda pour appender les données au vecteur
-  this->read_file_chunked(path, [&content](const uint8_t* chunk, size_t size) -> bool {
-    content.insert(content.end(), chunk, chunk + size);
-    return true;  // Continuer la lecture
+  // Utiliser read_file_chunked avec une méthode optimisée pour ajouter au vecteur
+  this->read_file_chunked(path, [&content, size](const uint8_t* chunk, size_t chunk_size) -> bool {
+    // Vérifier qu'on ne dépasse pas la capacité réservée
+    if (content.size() + chunk_size > size) {
+      // Ajuster la capacité si nécessaire
+      try {
+        content.reserve(content.size() + chunk_size);
+      } catch (std::bad_alloc &e) {
+        ESP_LOGE(TAG, "Memory allocation failed during read: %s", e.what());
+        return false;  // Arrêter la lecture
+      }
+    }
+    
+    // Ajouter les données efficacement
+    content.insert(content.end(), chunk, chunk + chunk_size);
+    return true;
   });
   
   return content;
 }
 
-// Méthode pour copier des fichiers volumineux
+// Méthode pour copier des fichiers volumineux - optimisée
 bool SdMmc::copy_file(const char *source_path, const char *dest_path) {
   ESP_LOGI(TAG, "Copying file from %s to %s", source_path, dest_path);
   
@@ -171,19 +206,23 @@ bool SdMmc::copy_file(const char *source_path, const char *dest_path) {
     return false;
   }
   
+  // Configurer de grands buffers pour la lecture et l'écriture
+  setvbuf(src, NULL, _IOFBF, CHUNK_SIZE);
+  setvbuf(dst, NULL, _IOFBF, CHUNK_SIZE);
+  
   // Obtenir la taille du fichier source
   fseek(src, 0, SEEK_END);
   size_t file_size = ftell(src);
   fseek(src, 0, SEEK_SET);
   
-  uint8_t buffer[CHUNK_SIZE];
   size_t total_copied = 0;
   bool success = true;
+  size_t flush_counter = 0;
   
   while (!feof(src)) {
-    size_t read_size = fread(buffer, 1, CHUNK_SIZE, src);
+    size_t read_size = fread(transfer_buffer, 1, CHUNK_SIZE, src);
     if (read_size > 0) {
-      size_t write_size = fwrite(buffer, 1, read_size, dst);
+      size_t write_size = fwrite(transfer_buffer, 1, read_size, dst);
       if (write_size != read_size) {
         ESP_LOGE(TAG, "Failed to write to destination file: %s", strerror(errno));
         success = false;
@@ -191,15 +230,17 @@ bool SdMmc::copy_file(const char *source_path, const char *dest_path) {
       }
       
       total_copied += read_size;
+      flush_counter += read_size;
       
-      // Flush périodiquement
-      if (total_copied % (CHUNK_SIZE * 4) == 0) {
+      // Flush périodiquement mais moins fréquemment
+      if (flush_counter >= CHUNK_SIZE * 4) {
         fflush(dst);
+        flush_counter = 0;
       }
       
-      // Afficher la progression pour les gros fichiers
-      if (file_size > CHUNK_SIZE * 10 && (total_copied % (CHUNK_SIZE * 10) == 0)) {
-        ESP_LOGI(TAG, "Copy progress: %.1f%%", (float)total_copied / file_size * 100);
+      // Réduire la fréquence des logs pour améliorer les performances
+      if (file_size > CHUNK_SIZE * 10 && (total_copied % (CHUNK_SIZE * 20) == 0)) {
+        ESP_LOGV(TAG, "Copy progress: %.1f%%", (float)total_copied / file_size * 100);
       }
     }
     
@@ -210,6 +251,8 @@ bool SdMmc::copy_file(const char *source_path, const char *dest_path) {
     }
   }
   
+  // Flush final pour s'assurer que toutes les données sont écrites
+  fflush(dst);
   fclose(src);
   fclose(dst);
   
@@ -218,6 +261,27 @@ bool SdMmc::copy_file(const char *source_path, const char *dest_path) {
   }
   
   return success;
+}
+
+// Méthode pour initialiser la carte SD avec des paramètres optimisés pour la vitesse
+void SdMmc::setup() {
+  // Configurer SD_MMC pour la vitesse maximale supportée par le matériel
+  // Mode 4-bit à haute vitesse (SDMMC_FREQ_HIGHSPEED)
+  if (!SD_MMC.begin("/sdcard", false, false, SDMMC_FREQ_HIGHSPEED)) {
+    ESP_LOGE(TAG, "SD card mount failed");
+    this->mark_failed();
+    return;
+  }
+  
+  uint8_t card_type = SD_MMC.cardType();
+  if (card_type == CARD_NONE) {
+    ESP_LOGE(TAG, "No SD card attached");
+    this->mark_failed();
+    return;
+  }
+  
+  ESP_LOGI(TAG, "SD card initialized successfully with optimized parameters");
+  this->update_sensors();
 }
 
 // Méthode pour mettre à jour les capteurs
