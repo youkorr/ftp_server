@@ -413,25 +413,8 @@ void SdMmc::update_sensors() {
 #endif
 
 #ifdef USE_TEXT_SENSOR
-  if (this->sd_card_type_text_sensor_ != nullptr && this->card_ != nullptr) {
-    switch (((sdmmc_card_t *) this->card_)->card_type) {
-      case SDMMC_CARD_TYPE_SDSC:
-        this->sd_card_type_text_sensor_->publish_state("SDSC");
-        break;
-      case SDMMC_CARD_TYPE_SDHC:
-        this->sd_card_type_text_sensor_->publish_state("SDHC");
-        break;
-      case SDMMC_CARD_TYPE_SDXC:
-        this->sd_card_type_text_sensor_->publish_state("SDXC");
-        break;
-      case SDMMC_CARD_TYPE_MMC:
-        this->sd_card_type_text_sensor_->publish_state("MMC");
-        break;
-      default:
-        this->sd_card_type_text_sensor_->publish_state("Unknown");
-        break;
-    }
-  }
+  LOG_TEXT_SENSOR("  ", "SD Card Type", this->sd_card_type_text_sensor_);
+
 #endif
 }
 
