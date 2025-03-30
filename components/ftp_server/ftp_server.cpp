@@ -30,7 +30,7 @@ std::string normalize_path(const std::string& base_path, const std::string& path
     return base_path;
   }
   
-  if (path[0] == '/') {
+  if (path[0] == '/sdcard') {
     if (path == "/") {
       return base_path;
     }
