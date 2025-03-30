@@ -52,14 +52,14 @@ class SdMmc : public Component {
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::DATA; }
 
-  void set_clk_pin(int pin) { this->clk_pin_ = pin; }
-  void set_cmd_pin(int pin) { this->cmd_pin_ = pin; }
-  void set_data0_pin(int pin) { this->data0_pin_ = pin; }
-  void set_data1_pin(int pin) { this->data1_pin_ = pin; }
-  void set_data2_pin(int pin) { this->data2_pin_ = pin; }
-  void set_data3_pin(int pin) { this->data3_pin_ = pin; }
-  void set_power_ctrl_pin(GPIOPin *pin) { this->power_ctrl_pin_ = pin; }
-  void set_mode_1bit(bool mode) { this->mode_1bit_ = mode; }
+  void set_clk_pin(uint8_t);
+  void set_cmd_pin(uint8_t);
+  void set_data0_pin(uint8_t);
+  void set_data1_pin(uint8_t);
+  void set_data2_pin(uint8_t);
+  void set_data3_pin(uint8_t);
+  void set_mode_1bit(bool);
+  void set_power_ctrl_pin(GPIOPin *);
 
   void write_file_chunked(const char *path, const uint8_t *buffer, size_t len, const char *mode);
   void write_file(const char *path, const uint8_t *buffer, size_t len);
