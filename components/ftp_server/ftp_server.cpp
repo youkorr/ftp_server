@@ -57,7 +57,7 @@ void FTPServer::setup() {
   ESP_LOGI(TAG, "Setting up FTP server...");
 
   if (root_path_.empty()) {
-    root_path_ = "/sdcard";
+    root_path_ = "/";
   }
   
   if (root_path_.back() != '/') {
