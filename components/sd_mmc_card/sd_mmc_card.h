@@ -102,7 +102,8 @@ class SdMmc : public Component {
  private:
   bool mode_1bit_{false};
   bool mounted_{false};
-  
+  void *card_{nullptr};
+
 #ifdef USE_SENSOR
   sensor::Sensor *used_space_sensor_{nullptr};
   sensor::Sensor *total_space_sensor_{nullptr};
@@ -131,6 +132,7 @@ class SdMmc : public Component {
 
 } // namespace sd_mmc_card
 } // namespace esphome
+
 
 
 
