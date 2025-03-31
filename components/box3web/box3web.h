@@ -51,27 +51,23 @@ class StreamingFileResponse {
       response->addHeader("Content-Length", std::to_string(file_size_).c_str());
   
       size_t index = 0;
-      const size_t chunk_size = 8192;  // Augmenté à 8 Ko (PSRAM a beaucoup de place)
-      
-      uint8_t *buffer = (uint8_t *) heap_caps_malloc(chunk_size, MALLOC_CAP_SPIRAM);
-      if (!buffer) {
-          request->send(500, "text/plain", "Memory allocation failed");
-          return;
-      }
+      const size_t chunk_size = 8192;
   
       while (index < file_size_) {
-          size_t read_size = this->sd_card_->read_file_chunked(path_, index, chunk_size, buffer);
+          std::vector<uint8_t> chunk = this->sd_card_->read_file_chunked(path_, index, chunk_size);
+          size_t read_size = chunk.size();
+  
           if (read_size == 0) break;
   
-          response->write((const char*)buffer, read_size);
+          response->writeString(std::string(chunk.begin(), chunk.end()));
           index += read_size;
   
-          delay(10);  // Pour éviter le watchdog reset
+          delay(10);
       }
   
-      heap_caps_free(buffer);  // Libère la mémoire après utilisation
       request->send(response);
   }
+
 
  private:
   sd_mmc_card::SdMmc *sd_card_;
