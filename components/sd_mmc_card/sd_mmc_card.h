@@ -75,6 +75,7 @@ class SdMmc : public Component {
   std::vector<FileInfo> list_directory_file_info(std::string path, uint8_t depth);
   size_t file_size(const char *path);
   size_t file_size(std::string const &path);
+  void read_file_stream(const char *path, size_t offset, size_t chunk_size, std::function<void(const uint8_t*, size_t)> callback);
 #ifdef USE_SENSOR
   void add_file_size_sensor(sensor::Sensor *, std::string const &path);
 #endif
