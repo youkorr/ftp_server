@@ -314,7 +314,6 @@ void Box3Web::handle_download(AsyncWebServerRequest *request, const std::string 
 }
 
 
-
 void Box3Web::handle_delete(AsyncWebServerRequest *request) {
     if (!this->deletion_enabled_) {
         request->send(401, "application/json", "{ \"error\": \"file deletion is disabled\" }");
