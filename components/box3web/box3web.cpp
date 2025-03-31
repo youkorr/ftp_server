@@ -293,6 +293,7 @@ void Box3Web::handle_index(AsyncWebServerRequest *request, std::string const &pa
 }
 
 // Nouvelle implémentation de handle_download utilisant les API standard du SdMmc
+// Fixed implementation of handle_download using the SdMmc class's correct API methods
 void Box3Web::handle_download(AsyncWebServerRequest *request, std::string const &path) const {
     if (!this->download_enabled_) {
         request->send(401, "application/json", "{ \"error\": \"file download is disabled\" }");
@@ -302,9 +303,16 @@ void Box3Web::handle_download(AsyncWebServerRequest *request, std::string const 
     String content_type = get_content_type(path);
     std::string filename = Path::file_name(path);
     
-    // Vérifier si le fichier existe et obtenir sa taille
-    if (!this->sd_mmc_card_->is_file(path)) {
+    // Verify file exists - using appropriate method from SdMmc
+    // Replace is_file with exists
+    if (!this->sd_mmc_card_->exists(path.c_str())) {
         request->send(404, "application/json", "{ \"error\": \"file not found\" }");
+        return;
+    }
+    
+    // Check if it's a directory (we want a file, not a directory)
+    if (this->sd_mmc_card_->is_directory(path)) {
+        request->send(404, "application/json", "{ \"error\": \"path is a directory, not a file\" }");
         return;
     }
     
@@ -314,10 +322,13 @@ void Box3Web::handle_download(AsyncWebServerRequest *request, std::string const 
         return;
     }
     
-    // Utiliser l'API d'AsyncWebServer pour créer une réponse de fichier
-    AsyncWebServerResponse *response = request->beginResponse(content_type, fileSize, [this, path](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
-        return this->sd_mmc_card_->read_file_chunk(path, buffer, maxLen, index);
-    });
+    // Create a proper response using the correct AsyncWebServerResponse constructor and method names
+    // Changed read_file_chunk to read_file_chunked
+    AsyncWebServerResponse *response = request->beginResponse(content_type.c_str(), fileSize, 
+        [this, path](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
+            return this->sd_mmc_card_->read_file_chunked(path.c_str(), buffer, maxLen, index);
+        }
+    );
     
     if (content_type == "audio/mpeg" || content_type == "audio/wav" ||
         content_type == "video/mp4" || startsWith(content_type.c_str(), "image/")) {
@@ -325,7 +336,7 @@ void Box3Web::handle_download(AsyncWebServerRequest *request, std::string const 
     }
     response->addHeader("Content-Disposition", ("inline; filename=\"" + String(filename.c_str()) + "\"").c_str());
     
-    // Envoyer la réponse
+    // Send the response
     request->send(response);
 }
 
