@@ -48,7 +48,8 @@ class StreamingFileResponse {
 
     response->addHeader("Content-Disposition", ("attachment; filename=\"" + path_ + "\"").c_str());
     response->addHeader("Accept-Ranges", "bytes");
-    response->addHeader("Content-Length", std::to_string(file_size_));
+    response->addHeader("Content-Length", std::to_string(file_size_).c_str());
+
 
     size_t index = 0;
     const size_t chunk_size = 8192;
