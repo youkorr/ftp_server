@@ -287,35 +287,56 @@ void Box3Web::handle_index(AsyncWebServerRequest *request, std::string const &pa
     request->send(response);
 }
 
+// Nouvelle implémentation de handle_download utilisant un chunked transfer
 void Box3Web::handle_download(AsyncWebServerRequest *request, std::string const &path) const {
     if (!this->download_enabled_) {
         request->send(401, "application/json", "{ \"error\": \"file download is disabled\" }");
         return;
     }
-    auto file = this->sd_mmc_card_->read_file(path);
-    if (file.size() == 0) {
-        request->send(404, "application/json", "{ \"error\": \"failed to read file or file is empty\" }");
+    
+    String content_type = get_content_type(path);
+    std::string filename = Path::file_name(path);
+    
+    // Vérifier si le fichier existe et obtenir sa taille
+    if (!this->sd_mmc_card_->exists(path)) {
+        request->send(404, "application/json", "{ \"error\": \"file not found\" }");
         return;
     }
-    String content_type = get_content_type(path);
+    
+    size_t fileSize = this->sd_mmc_card_->get_file_size(path);
+    if (fileSize == 0) {
+        request->send(404, "application/json", "{ \"error\": \"file is empty or cannot be read\" }");
+        return;
+    }
+    
+    // Créer une réponse chunked
+    AsyncWebServerResponse *response = nullptr;
+    
 #ifdef USE_ESP_IDF
-    auto *response = request->beginResponse_P(200, content_type.c_str(), file.data(), file.size());
+    // En utilisant ESPAsyncWebServer pour ESP-IDF
+    // Créer un nouveau FileResponse personnalisé qui lira le fichier en chunks
+    response = new FileResponse(path.c_str(), content_type.c_str(), true, this->sd_mmc_card_);
     if (content_type == "audio/mpeg" || content_type == "audio/wav" ||
         content_type == "video/mp4" || startsWith(content_type.c_str(), "image/")) {
         response->addHeader("Accept-Ranges", "bytes");
     }
-    std::string filename = Path::file_name(path);
     response->addHeader("Content-Disposition", ("inline; filename=\"" + String(filename.c_str()) + "\"").c_str());
 #else
-    auto *response = request->beginResponseStream(content_type.c_str(), file.size());
+    // Pour ESP8266/ESP32 avec Arduino
+    // Utiliser ChunkedResponse d'AsyncWebServer
+    response = new ChunkedResponse(content_type.c_str(), [this, path](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
+        // Cette fonction sera appelée plusieurs fois pour remplir les chunks
+        return this->sd_mmc_card_->read_file_chunk(path, buffer, maxLen, index);
+    });
+    
     if (content_type == "audio/mpeg" || content_type == "audio/wav" ||
         content_type == "video/mp4" || startsWith(content_type.c_str(), "image/")) {
         response->addHeader("Accept-Ranges", "bytes");
     }
-    std::string filename = Path::file_name(path);
     response->addHeader("Content-Disposition", ("inline; filename=\"" + String(filename.c_str()) + "\"").c_str());
-    response->write(file.data(), file.size());
 #endif
+
+    // Envoyer la réponse
     request->send(response);
 }
 
