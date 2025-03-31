@@ -353,7 +353,8 @@ void Box3Web::handle_delete(AsyncWebServerRequest *request) {
         return;
     }
 
-    if (!this->sd_mmc_card_->file_exists(path)) {
+    if (!this->sd_mmc_card_->is_file(path)) {
+
         request->send(404, "application/json", "{ \"error\": \"file not found\" }");
         return;
     }
