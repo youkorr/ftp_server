@@ -308,15 +308,14 @@ void Box3Web::handle_download(AsyncWebServerRequest *request, const std::string 
         return;
     }
 
-    // Utiliser la classe personnalisée pour le streaming
+    // Créer la réponse de streaming
     auto *response = new StreamingFileResponse(this->sd_mmc_card_, path, content_type.c_str(), fileSize);
     response->addHeader("Content-Disposition", ("attachment; filename=\"" + filename + "\"").c_str());
     response->addHeader("Accept-Ranges", "bytes");
 
+    // Envoyer la réponse
     request->send(response);
 }
-
-
 
 
 void Box3Web::handle_delete(AsyncWebServerRequest *request) {
