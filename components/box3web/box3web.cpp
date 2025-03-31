@@ -337,26 +337,41 @@ void Box3Web::handle_download(AsyncWebServerRequest *request, std::string const 
 }
 
 
-
-
-
 void Box3Web::handle_delete(AsyncWebServerRequest *request) {
     if (!this->deletion_enabled_) {
         request->send(401, "application/json", "{ \"error\": \"file deletion is disabled\" }");
         return;
     }
+
     std::string extracted = this->extract_path_from_url(std::string(request->url().c_str()));
     std::string path = this->build_absolute_path(extracted);
+
+    if (!this->sd_mmc_card_->file_exists(path)) {
+        request->send(404, "application/json", "{ \"error\": \"file not found\" }");
+        return;
+    }
+
     if (this->sd_mmc_card_->is_directory(path)) {
         request->send(401, "application/json", "{ \"error\": \"cannot delete a directory\" }");
         return;
     }
-    if (this->sd_mmc_card_->delete_file(path)) {
+
+    if (!this->sd_mmc_card_->is_writable()) {
+        request->send(401, "application/json", "{ \"error\": \"SD card is read-only\" }");
+        return;
+    }
+
+    if (std::remove(path.c_str()) == 0) {
         request->send(204, "application/json", "{}");
         return;
     }
-    request->send(401, "application/json", "{ \"error\": \"failed to delete file\" }");
+
+    request->send(500, "application/json", "{ \"error\": \"failed to delete file\" }");
 }
+
+
+
+
 
 std::string Box3Web::build_prefix() const {
     if (this->url_prefix_.length() == 0 || this->url_prefix_.at(0) != '/')
