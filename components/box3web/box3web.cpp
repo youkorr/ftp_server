@@ -313,11 +313,11 @@ void Box3Web::handle_download(AsyncWebServerRequest *request, std::string const 
         return;
     }
 
-    // Création d'un flux de réponse
-    AsyncWebServerResponseStream *response = request->beginResponseStream(content_type.c_str(), fileSize);
+    // Utilisation d'AsyncResponseStream avec un buffer de 1024 octets
+    AsyncResponseStream *response = request->beginResponseStream(content_type.c_str());
 
+    const size_t chunkSize = 1024;
     size_t index = 0;
-    const size_t chunkSize = 1024;  // Taille des chunks à lire
     std::vector<uint8_t> buffer(chunkSize);
 
     while (index < fileSize) {
