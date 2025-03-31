@@ -313,17 +313,19 @@ void Box3Web::handle_download(AsyncWebServerRequest *request, std::string const 
         return;
     }
 
-    // Utilisation d'AsyncResponseStream avec un buffer de 1024 octets
+    // Création de la réponse en streaming
     AsyncResponseStream *response = request->beginResponseStream(content_type.c_str());
 
     const size_t chunkSize = 1024;
     size_t index = 0;
-    std::vector<uint8_t> buffer(chunkSize);
 
     while (index < fileSize) {
         auto chunk = this->sd_mmc_card_->read_file_chunked(path, index, chunkSize);
         if (chunk.empty()) break;
-        response->write(chunk.data(), chunk.size());
+        
+        // Utiliser print() au lieu de write()
+        response->print(std::string(chunk.begin(), chunk.end()));
+
         index += chunk.size();
     }
 
@@ -333,6 +335,7 @@ void Box3Web::handle_download(AsyncWebServerRequest *request, std::string const 
     // Envoi de la réponse au client
     request->send(response);
 }
+
 
 
 
