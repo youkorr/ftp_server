@@ -1,175 +1,168 @@
 #pragma once
 
-#include "esphome/components/web_server_base/web_server_base.h"
+#include "esp_http_server.h"
 #include "../sd_mmc_card/sd_mmc_card.h"
 #include <string>
 #include <vector>
 #include "esphome/core/component.h"  // Ajout de Component
 
-
 namespace esphome {
 namespace box3web {
 
+// Définir une taille de buffer par défaut
+#ifndef ASYNC_RESPONSE_BUFFER_SIZE
+#define ASYNC_RESPONSE_BUFFER_SIZE 1024
+#endif
+
 // Nouvelle classe pour gérer les réponses de fichiers en chunks
-class FileResponse : public AsyncWebServerResponse {
+class FileResponse {
 public:
-    FileResponse(const char* path, const char* contentType, bool download, sd_mmc_card::SdMmc* card)
-        : _path(path), _sd_mmc_card(card) {
-        _contentType = contentType;
-        _download = download;
-        _fileSize = card->get_file_size(path);
-        _sendFilePos = 0;
+    FileResponse(const char* path, const char* content_type, bool download, sd_mmc_card::SdMmc* card)
+        : _path(path), _content_type(content_type), _download(download), _sd_mmc_card(card) {
+        _file_size = _sd_mmc_card->get_file_size(path); // Implémentez cette méthode dans SdMmc
+        _send_file_pos = 0;
     }
-    
+
     ~FileResponse() {
         // Fermer les ressources si nécessaire
     }
-    
-    bool _sourceValid() const { return _sd_mmc_card->exists(_path); }
-    void _respond(AsyncWebServerRequest *request) {
-        _state = RESPONSE_HEADERS;
-        String headers = _assembleHead(request->version());
-        request->client()->write(headers.c_str(), headers.length());
-        _state = RESPONSE_CONTENT;
-        _fillBuffer();
-        _flushBuffer();
+
+    bool source_valid() const {
+        return _sd_mmc_card->exists(_path); // Implémentez cette méthode dans SdMmc
     }
-    
-    size_t _fillBuffer() {
-        size_t remaining = _fileSize - _sendFilePos;
-        size_t bytesToRead = (ASYNC_RESPONSE_BUFFER_SIZE < remaining) ? ASYNC_RESPONSE_BUFFER_SIZE : remaining;
-        
-        if (bytesToRead > 0) {
-            size_t bytesRead = _sd_mmc_card->read_file_chunk(_path, (uint8_t*)_content, bytesToRead, _sendFilePos);
-            _sendFilePos += bytesRead;
-            _contentLength = bytesRead;
-            return bytesRead;
+
+    esp_err_t respond(httpd_req_t *req) {
+        if (!source_valid()) {
+            return httpd_resp_send_404(req);
         }
-        return 0;
+
+        // Envoyer les en-têtes HTTP
+        httpd_resp_set_type(req, _content_type);
+        if (_download) {
+            httpd_resp_set_hdr(req, "Content-Disposition", "attachment");
+        }
+
+        // Envoyer le contenu du fichier en chunks
+        size_t remaining = _file_size;
+        while (remaining > 0) {
+            size_t bytes_to_read = (ASYNC_RESPONSE_BUFFER_SIZE < remaining) ? ASYNC_RESPONSE_BUFFER_SIZE : remaining;
+            uint8_t buffer[ASYNC_RESPONSE_BUFFER_SIZE];
+            size_t bytes_read = _sd_mmc_card->read_file_chunk(_path, buffer, bytes_to_read, _send_file_pos);
+
+            if (bytes_read == 0) {
+                break; // Fin du fichier
+            }
+
+            esp_err_t err = httpd_resp_send_chunk(req, reinterpret_cast<const char*>(buffer), bytes_read);
+            if (err != ESP_OK) {
+                return err; // Erreur lors de l'envoi
+            }
+
+            _send_file_pos += bytes_read;
+            remaining -= bytes_read;
+        }
+
+        // Terminer la réponse
+        return httpd_resp_send_chunk(req, nullptr, 0);
     }
-    
-    size_t _readBufferIdx(uint8_t* data, size_t len) {
-        return 0; // Non utilisé dans cette implémentation
-    }
-    
-    size_t _readBuffer(uint8_t* data, size_t len) {
-        size_t bytesToCopy = (len < _contentLength) ? len : _contentLength;
-        memcpy(data, _content, bytesToCopy);
-        _contentLength -= bytesToCopy;
-        return bytesToCopy;
-    }
-    
+
 private:
     std::string _path;
+    const char* _content_type;
+    bool _download;
     sd_mmc_card::SdMmc* _sd_mmc_card;
-    size_t _fileSize;
-    size_t _sendFilePos;
-    char _content[ASYNC_RESPONSE_BUFFER_SIZE];
+    size_t _file_size;
+    size_t _send_file_pos;
 };
 
-// Cette classe est nécessaire pour ESP8266/Arduino
-class ChunkedResponse : public AsyncWebServerResponse {
+// Réponse chunked pour ESP-IDF
+class ChunkedResponse {
 public:
-    typedef std::function<size_t(uint8_t *buffer, size_t maxLen, size_t index)> ChunkCallback;
-    
-    ChunkedResponse(const String& contentType, ChunkCallback callback, size_t chunkSize = 4096)
-        : _callback(callback), _chunkIndex(0), _chunkSize(chunkSize) {
-        _contentType = contentType;
-        _chunked = true;  // Activer le mode chunked
-    }
-    
-    ~ChunkedResponse() {
-        // Cleanup
-    }
-    
-    void _respond(AsyncWebServerRequest *request) {
-        _state = RESPONSE_HEADERS;
-        String headers = _assembleHead(request->version());
-        request->client()->write(headers.c_str(), headers.length());
-        _state = RESPONSE_CONTENT;
-        
-        // Envoyer le premier chunk
-        _sendChunk(request);
-    }
-    
-    bool _sourceValid() const { return true; }
-    
-    void _sendChunk(AsyncWebServerRequest *request) {
-        uint8_t *buffer = new uint8_t[_chunkSize];
-        size_t bytesRead = _callback(buffer, _chunkSize, _chunkIndex);
-        
-        if (bytesRead > 0) {
-            // Envoyer le chunk avec sa taille en hexadécimal
-            char lenStr[10];
-            sprintf(lenStr, "%x\r\n", bytesRead);
-            request->client()->write(lenStr, strlen(lenStr));
-            request->client()->write((char*)buffer, bytesRead);
-            request->client()->write("\r\n", 2);
-            
-            _chunkIndex += bytesRead;
-            
-            // Programmer l'envoi du prochain chunk
-            // Note: Ceci est une simplification, il faudrait idéalement utiliser un mécanisme asynchrone
-            if (bytesRead == _chunkSize) {
-                // Il y a probablement plus de données à envoyer
-                _sendChunk(request);
-            } else {
-                // C'était le dernier chunk, envoyer un chunk vide pour terminer
-                request->client()->write("0\r\n\r\n", 5);
-                _state = RESPONSE_WAIT_ACK;
+    typedef std::function<size_t(uint8_t *buffer, size_t max_len, size_t index)> ChunkCallback;
+
+    ChunkedResponse(const char* content_type, ChunkCallback callback, size_t chunk_size = 4096)
+        : _content_type(content_type), _callback(callback), _chunk_index(0), _chunk_size(chunk_size) {}
+
+    esp_err_t respond(httpd_req_t *req) {
+        // Envoyer les en-têtes HTTP
+        httpd_resp_set_type(req, _content_type);
+
+        // Envoyer les données en chunks
+        while (true) {
+            uint8_t buffer[_chunk_size];
+            size_t bytes_read = _callback(buffer, _chunk_size, _chunk_index);
+
+            if (bytes_read == 0) {
+                break; // Fin des données
             }
-        } else {
-            // Aucune donnée lue, envoyer un chunk vide pour terminer
-            request->client()->write("0\r\n\r\n", 5);
-            _state = RESPONSE_WAIT_ACK;
+
+            esp_err_t err = httpd_resp_send_chunk(req, reinterpret_cast<const char*>(buffer), bytes_read);
+            if (err != ESP_OK) {
+                return err; // Erreur lors de l'envoi
+            }
+
+            _chunk_index += bytes_read;
         }
-        
-        delete[] buffer;
+
+        // Terminer la réponse
+        return httpd_resp_send_chunk(req, nullptr, 0);
     }
-    
+
 private:
+    const char* _content_type;
     ChunkCallback _callback;
-    size_t _chunkIndex;
-    size_t _chunkSize;
+    size_t _chunk_index;
+    size_t _chunk_size;
 };
 
-struct Path {
-    static const char separator = '/';
-    static std::string file_name(std::string const &path);
-    static bool is_absolute(std::string const &path);
-    static bool trailing_slash(std::string const &path);
-    static std::string join(std::string const &first, std::string const &second);
-    static std::string remove_root_path(std::string path, std::string const &root);
-};
-
-class Box3Web : public web_server_base::RequestHandler {
+// Classe principale Box3Web
+class Box3Web {
 public:
-    explicit Box3Web(web_server_base::WebServerBase *base);
-    void setup();
-    void dump_config();
-    bool canHandle(AsyncWebServerRequest *request) override;
-    void handleRequest(AsyncWebServerRequest *request) override;
-    void handleUpload(AsyncWebServerRequest *request, const String &filename, size_t index, uint8_t *data,
-                    size_t len, bool final) override;
-    void set_url_prefix(std::string const &prefix);
-    void set_root_path(std::string const &path);
-    void set_sd_mmc_card(sd_mmc_card::SdMmc *card);
-    void set_deletion_enabled(bool allow);
-    void set_download_enabled(bool allow);
-    void set_upload_enabled(bool allow);
+    explicit Box3Web() : sd_mmc_card_(nullptr) {}
+
+    void setup(httpd_handle_t server) {
+        this->server_ = server;
+        register_handlers();
+    }
+
+    void set_url_prefix(const std::string &prefix) {
+        url_prefix_ = prefix;
+    }
+
+    void set_root_path(const std::string &path) {
+        root_path_ = path;
+    }
+
+    void set_sd_mmc_card(sd_mmc_card::SdMmc *card) {
+        sd_mmc_card_ = card;
+    }
+
+    void set_deletion_enabled(bool allow) {
+        deletion_enabled_ = allow;
+    }
+
+    void set_download_enabled(bool allow) {
+        download_enabled_ = allow;
+    }
+
+    void set_upload_enabled(bool allow) {
+        upload_enabled_ = allow;
+    }
 
 protected:
-    String get_content_type(const std::string &path) const;
-    void handle_get(AsyncWebServerRequest *request) const;
-    void handle_download(AsyncWebServerRequest *request, std::string const &path) const;
-    void handle_delete(AsyncWebServerRequest *request);
-    void handle_index(AsyncWebServerRequest *request, std::string const &path) const;
-    void write_row(AsyncResponseStream *response, sd_mmc_card::FileInfo const &info) const;
-    std::string build_prefix() const;
-    std::string extract_path_from_url(std::string const &url) const;
-    std::string build_absolute_path(std::string relative_path) const;
+    void register_handlers() {
+        // Enregistrez les gestionnaires de routes ici
+    }
 
-    web_server_base::WebServerBase *base_;
+    std::string extract_path_from_url(const std::string &url) const {
+        return url.substr(url_prefix_.size());
+    }
+
+    std::string build_absolute_path(const std::string &relative_path) const {
+        return root_path_ + relative_path;
+    }
+
+    httpd_handle_t server_;
     std::string url_prefix_ = "";
     std::string root_path_ = "/";
     sd_mmc_card::SdMmc *sd_mmc_card_{nullptr};
