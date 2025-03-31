@@ -37,6 +37,7 @@ class Box3Web : public Component, public AsyncWebHandler {  // Héritage de Comp
   void handleRequest(AsyncWebServerRequest *request) override;
   void handleUpload(AsyncWebServerRequest *request, const String &filename, size_t index, uint8_t *data,
                     size_t len, bool final) override;
+
 class StreamingFileResponse {
  public:
   StreamingFileResponse(sd_mmc_card::SdMmc *sd_card, const std::string &path, const std::string &content_type, size_t file_size)
@@ -45,9 +46,9 @@ class StreamingFileResponse {
   void stream_file(AsyncWebServerRequest *request) {
     // Création d'une réponse en streaming
     auto *response = request->beginResponseStream(content_type_.c_str());
-    response->setCode(200);  // Code de succès OK
     response->addHeader("Content-Disposition", ("attachment; filename=\"" + path_ + "\"").c_str());
     response->addHeader("Accept-Ranges", "bytes");
+    response->addHeader("Content-Length", String(file_size_).c_str());
 
     size_t index = 0;
     const size_t chunk_size = 1024;
@@ -55,11 +56,13 @@ class StreamingFileResponse {
       auto chunk = this->sd_card_->read_file_chunked(path_, index, chunk_size);
       if (chunk.empty()) break;
       
-      response->write(chunk.data(), chunk.size());
+      // Utilisation de print() pour envoyer des données au lieu de write()
+      response->print(std::string(chunk.begin(), chunk.end()));
       index += chunk.size();
     }
 
-    request->send(response);  // Envoi de la réponse au client
+    // Envoi de la réponse au client
+    request->send(response);
   }
 
  private:
