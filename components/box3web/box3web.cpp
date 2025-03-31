@@ -8,17 +8,6 @@ namespace box3web {
 
 static const char *TAG = "box3web";
 
-// Déclaration de la classe Path en début de fichier
-class Path {
-public:
-    static const char separator = '/';
-    static std::string file_name(std::string const &path);
-    static bool is_absolute(std::string const &path);
-    static bool trailing_slash(std::string const &path);
-    static std::string join(std::string const &first, std::string const &second);
-    static std::string remove_root_path(std::string path, std::string const &root);
-};
-
 // Fonctions utilitaires pour remplacer endsWith et startsWith
 bool endsWith(const std::string &str, const std::string &suffix) {
     if (suffix.size() > str.size()) return false;
@@ -303,37 +292,7 @@ void Box3Web::handle_index(AsyncWebServerRequest *request, std::string const &pa
     request->send(response);
 }
 
-// Déclaration des classes pour FileResponse et ChunkedResponse
-#ifdef USE_ESP_IDF
-// Classe pour ESP-IDF
-class FileResponse : public AsyncWebServerResponse {
-public:
-    FileResponse(const char* path, const char* contentType, bool download, sd_mmc_card::SdMmc* card)
-        : AsyncWebServerResponse(contentType) {
-        _path = path;
-        _download = download;
-        _card = card;
-        // Initialisation supplémentaire ici
-    }
-    // Méthodes nécessaires pour l'implémentation
-};
-#else
-// Classe pour ESP8266/ESP32
-class ChunkedResponse : public AsyncWebServerResponse {
-public:
-    using ReadCallback = std::function<size_t(uint8_t*, size_t, size_t)>;
-    
-    ChunkedResponse(const char* contentType, ReadCallback callback)
-        : AsyncWebServerResponse(contentType), _callback(callback) {
-        // Initialisation supplémentaire ici
-    }
-    
-private:
-    ReadCallback _callback;
-};
-#endif
-
-// Nouvelle implémentation de handle_download utilisant un chunked transfer
+// Nouvelle implémentation de handle_download utilisant les API standard du SdMmc
 void Box3Web::handle_download(AsyncWebServerRequest *request, std::string const &path) const {
     if (!this->download_enabled_) {
         request->send(401, "application/json", "{ \"error\": \"file download is disabled\" }");
@@ -344,34 +303,19 @@ void Box3Web::handle_download(AsyncWebServerRequest *request, std::string const 
     std::string filename = Path::file_name(path);
     
     // Vérifier si le fichier existe et obtenir sa taille
-    if (!this->sd_mmc_card_->exists(path)) {
+    if (!this->sd_mmc_card_->is_file(path)) {
         request->send(404, "application/json", "{ \"error\": \"file not found\" }");
         return;
     }
     
-    size_t fileSize = this->sd_mmc_card_->get_file_size(path);
+    size_t fileSize = this->sd_mmc_card_->file_size(path.c_str());
     if (fileSize == 0) {
         request->send(404, "application/json", "{ \"error\": \"file is empty or cannot be read\" }");
         return;
     }
     
-    // Créer une réponse chunked
-    AsyncWebServerResponse *response = nullptr;
-    
-#ifdef USE_ESP_IDF
-    // En utilisant ESPAsyncWebServer pour ESP-IDF
-    // Créer un nouveau FileResponse personnalisé qui lira le fichier en chunks
-    response = new FileResponse(path.c_str(), content_type.c_str(), true, this->sd_mmc_card_);
-    if (content_type == "audio/mpeg" || content_type == "audio/wav" ||
-        content_type == "video/mp4" || startsWith(content_type.c_str(), "image/")) {
-        response->addHeader("Accept-Ranges", "bytes");
-    }
-    response->addHeader("Content-Disposition", ("inline; filename=\"" + String(filename.c_str()) + "\"").c_str());
-#else
-    // Pour ESP8266/ESP32 avec Arduino
-    // Utiliser ChunkedResponse d'AsyncWebServer
-    response = new ChunkedResponse(content_type.c_str(), [this, path](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
-        // Cette fonction sera appelée plusieurs fois pour remplir les chunks
+    // Utiliser l'API d'AsyncWebServer pour créer une réponse de fichier
+    AsyncWebServerResponse *response = request->beginResponse(content_type, fileSize, [this, path](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
         return this->sd_mmc_card_->read_file_chunk(path, buffer, maxLen, index);
     });
     
@@ -380,8 +324,7 @@ void Box3Web::handle_download(AsyncWebServerRequest *request, std::string const 
         response->addHeader("Accept-Ranges", "bytes");
     }
     response->addHeader("Content-Disposition", ("inline; filename=\"" + String(filename.c_str()) + "\"").c_str());
-#endif
-
+    
     // Envoyer la réponse
     request->send(response);
 }
