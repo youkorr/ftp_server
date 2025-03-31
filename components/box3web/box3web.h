@@ -37,6 +37,62 @@ class Box3Web : public Component, public AsyncWebHandler {  // Héritage de Comp
   void handleRequest(AsyncWebServerRequest *request) override;
   void handleUpload(AsyncWebServerRequest *request, const String &filename, size_t index, uint8_t *data,
                     size_t len, bool final) override;
+class StreamingFileResponse : public AsyncWebServerResponse {
+private:
+    sd_mmc_card::SdMmc* sd_card_;
+    std::string file_path_;
+    size_t file_size_;
+    File file_;
+    size_t sent_size_ = 0;
+    const size_t CHUNK_SIZE = 4096; // Taille des morceaux à envoyer
+    
+public:
+    StreamingFileResponse(sd_mmc_card::SdMmc* sd_card, const std::string& path, 
+                          const String& contentType, size_t size) 
+        : sd_card_(sd_card), file_path_(path), file_size_(size) {
+        _contentType = contentType;
+        _contentLength = size;
+    }
+    
+    void stream_file(AsyncWebServerRequest *request) {
+        request->send(this);
+    }
+    
+    // Implémentation des méthodes virtuelles nécessaires
+    virtual void _respond(AsyncWebServerRequest *request) {
+        file_ = sd_card_->open_file(file_path_.c_str(), "r");
+        _state = RESPONSE_HEADERS;
+        _sendHeaders(request);
+        _state = RESPONSE_CONTENT;
+        request->client()->setRxTimeout(0);
+        request->client()->setNoDelay(true);
+        _ack(request, 0, 0);
+    }
+    
+    virtual size_t _fillBuffer(uint8_t *buf, size_t maxLen) {
+        size_t remaining = file_size_ - sent_size_;
+        size_t to_send = std::min(maxLen, std::min(CHUNK_SIZE, remaining));
+        
+        if (to_send == 0) {
+            return 0;
+        }
+        
+        size_t read = sd_card_->read_file_data(file_, buf, to_send);
+        sent_size_ += read;
+        
+        if (sent_size_ >= file_size_) {
+            sd_card_->close_file(file_);
+        }
+        
+        return read;
+    }
+    
+    virtual bool _sourceValid() const {
+        return true;
+    }
+};
+
+
 
 class StreamingFileResponse {
  public:
