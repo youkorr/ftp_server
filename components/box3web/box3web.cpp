@@ -301,29 +301,25 @@ void Box3Web::handle_download(AsyncWebServerRequest *request, std::string const 
     String content_type = get_content_type(path);
     std::string filename = Path::file_name(path);
 
-    // Vérification de l'existence du fichier avec is_file
-    if (!this->sd_mmc_card_->is_file(path)) {
+    // Vérification si le fichier existe en utilisant file_size
+    if (this->sd_mmc_card_->file_size(path.c_str()) < 0) {
         request->send(404, "application/json", "{ \"error\": \"file not found\" }");
         return;
     }
 
-    // Vérifier si c'est un répertoire
-    if (this->sd_mmc_card_->is_directory(path)) {
-        request->send(404, "application/json", "{ \"error\": \"path is a directory, not a file\" }");
-        return;
-    }
-
-    size_t fileSize = this->sd_mmc_card_->file_size(path);
+    size_t fileSize = this->sd_mmc_card_->file_size(path.c_str());
     if (fileSize == 0) {
         request->send(404, "application/json", "{ \"error\": \"file is empty or cannot be read\" }");
         return;
     }
 
-    // Créer une réponse en envoyant des morceaux de fichier
-    AsyncWebServerResponse *response = request->beginResponse(content_type.c_str(), fileSize, 
-        [this, path](size_t index, size_t maxLen) -> std::string {
+    // Création d'une réponse en mode "chunked"
+    AsyncWebServerResponse *response = request->beginChunkedResponse(content_type.c_str(),
+        [this, path](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
             auto chunk = this->sd_mmc_card_->read_file_chunked(path, index, maxLen);
-            return std::string(chunk.begin(), chunk.end()); // Convertir en std::string
+            if (chunk.empty()) return 0; // Fin de fichier
+            memcpy(buffer, chunk.data(), chunk.size());
+            return chunk.size();
         }
     );
 
@@ -337,6 +333,7 @@ void Box3Web::handle_download(AsyncWebServerRequest *request, std::string const 
     // Envoyer la réponse
     request->send(response);
 }
+
 
 
 void Box3Web::handle_delete(AsyncWebServerRequest *request) {
