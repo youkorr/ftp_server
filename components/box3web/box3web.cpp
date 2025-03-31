@@ -8,6 +8,17 @@ namespace box3web {
 
 static const char *TAG = "box3web";
 
+// Déclaration de la classe Path en début de fichier
+class Path {
+public:
+    static const char separator = '/';
+    static std::string file_name(std::string const &path);
+    static bool is_absolute(std::string const &path);
+    static bool trailing_slash(std::string const &path);
+    static std::string join(std::string const &first, std::string const &second);
+    static std::string remove_root_path(std::string path, std::string const &root);
+};
+
 // Fonctions utilitaires pour remplacer endsWith et startsWith
 bool endsWith(const std::string &str, const std::string &suffix) {
     if (suffix.size() > str.size()) return false;
@@ -17,6 +28,11 @@ bool endsWith(const std::string &str, const std::string &suffix) {
 bool startsWith(const std::string &str, const std::string &prefix) {
     if (prefix.size() > str.size()) return false;
     return std::equal(prefix.begin(), prefix.end(), str.begin());
+}
+
+// Ajout de la fonction str_startswith manquante
+bool str_startswith(const std::string &str, const std::string &prefix) {
+    return startsWith(str, prefix);
 }
 
 Box3Web::Box3Web(web_server_base::WebServerBase *base) : base_(base) {}
@@ -287,6 +303,36 @@ void Box3Web::handle_index(AsyncWebServerRequest *request, std::string const &pa
     request->send(response);
 }
 
+// Déclaration des classes pour FileResponse et ChunkedResponse
+#ifdef USE_ESP_IDF
+// Classe pour ESP-IDF
+class FileResponse : public AsyncWebServerResponse {
+public:
+    FileResponse(const char* path, const char* contentType, bool download, sd_mmc_card::SdMmc* card)
+        : AsyncWebServerResponse(contentType) {
+        _path = path;
+        _download = download;
+        _card = card;
+        // Initialisation supplémentaire ici
+    }
+    // Méthodes nécessaires pour l'implémentation
+};
+#else
+// Classe pour ESP8266/ESP32
+class ChunkedResponse : public AsyncWebServerResponse {
+public:
+    using ReadCallback = std::function<size_t(uint8_t*, size_t, size_t)>;
+    
+    ChunkedResponse(const char* contentType, ReadCallback callback)
+        : AsyncWebServerResponse(contentType), _callback(callback) {
+        // Initialisation supplémentaire ici
+    }
+    
+private:
+    ReadCallback _callback;
+};
+#endif
+
 // Nouvelle implémentation de handle_download utilisant un chunked transfer
 void Box3Web::handle_download(AsyncWebServerRequest *request, std::string const &path) const {
     if (!this->download_enabled_) {
@@ -376,6 +422,7 @@ std::string Box3Web::build_absolute_path(std::string relative_path) const {
     return absolute;
 }
 
+// Implémentation des méthodes de la classe Path
 std::string Path::file_name(std::string const &path) {
     size_t pos = path.rfind(Path::separator);
     if (pos != std::string::npos) {
