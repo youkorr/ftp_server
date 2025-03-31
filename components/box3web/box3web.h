@@ -44,29 +44,30 @@ class StreamingFileResponse {
       : sd_card_(sd_card), path_(path), content_type_(content_type), file_size_(file_size) {}
 
   void stream_file(AsyncWebServerRequest *request) {
-      auto *response = request->beginResponseStream(content_type_.c_str());
-  
-      response->addHeader("Content-Disposition", ("attachment; filename=\"" + path_ + "\"").c_str());
-      response->addHeader("Accept-Ranges", "bytes");
-      response->addHeader("Content-Length", std::to_string(file_size_).c_str());
-  
-      size_t index = 0;
-      const size_t chunk_size = 8192;
-  
-      while (index < file_size_) {
-          std::vector<uint8_t> chunk = this->sd_card_->read_file_chunked(path_, index, chunk_size);
-          size_t read_size = chunk.size();
-  
-          if (read_size == 0) break;
-  
-          response->writeString(std::string(chunk.begin(), chunk.end()));
-          index += read_size;
-  
-          delay(10);
-      }
-  
-      request->send(response);
-  }
+    auto *response = request->beginResponseStream(content_type_.c_str());
+
+    response->addHeader("Content-Disposition", ("attachment; filename=\"" + path_ + "\"").c_str());
+    response->addHeader("Accept-Ranges", "bytes");
+    response->addHeader("Content-Length", std::to_string(file_size_));
+
+    size_t index = 0;
+    const size_t chunk_size = 8192;
+
+    while (index < file_size_) {
+        std::vector<uint8_t> chunk = this->sd_card_->read_file_chunked(path_, index, chunk_size);
+        size_t read_size = chunk.size();
+
+        if (read_size == 0) break;
+
+        // Convertir les données en string et les envoyer
+        response->print(std::string(chunk.begin(), chunk.end()));
+
+        index += read_size;
+        delay(10);
+    }
+
+    request->send(response);
+}
 
 
  private:
