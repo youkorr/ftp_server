@@ -373,31 +373,59 @@ std::vector<uint8_t> SdMmc::read_file(char const *path) {
   return res;
 }
 
-std::vector<uint8_t> SdMmc::read_file_chunked(char const *path, size_t offset, size_t chunk_size) {
-  std::string absolut_path = build_path(path);
-  FILE *file = nullptr;
-  file = fopen(absolut_path.c_str(), "rb");
-  if (file == nullptr) {
-    ESP_LOGE(TAG, "Failed to open file for chunked reading");
-    return std::vector<uint8_t>();
-  }
+// Lecture d'un fichier en une seule fois (existant)
+std::vector<uint8_t> SdMmc::read_file_chunked(const char *path, size_t offset, size_t chunk_size) {
+    std::string absolut_path = build_path(path);
+    FILE *file = fopen(absolut_path.c_str(), "rb");
+    if (!file) {
+        ESP_LOGE(TAG, "Failed to open file: %s", absolut_path.c_str());
+        return {};
+    }
 
-  if (fseek(file, offset, SEEK_SET) != 0) {
-    ESP_LOGE(TAG, "Failed to seek to position");
-    return std::vector<uint8_t>();
-  }
+    std::unique_ptr<FILE, decltype(&fclose)> file_guard(file, fclose);
 
-  std::vector<uint8_t> res;
-  res.resize(chunk_size);
-  size_t read = fread(res.data(), 1, chunk_size, file);
-  if (read < chunk_size) {
-    res.resize(read);
-  }
-  fclose(file);
-  return res;
+    if (fseek(file, offset, SEEK_SET) != 0) {
+        ESP_LOGE(TAG, "Failed to seek to position %zu in file: %s (errno: %d)", offset, absolut_path.c_str(), errno);
+        return {};
+    }
+
+    std::vector<uint8_t> res(chunk_size);
+    size_t read = fread(res.data(), 1, chunk_size, file);
+    res.resize(read); // Ajuste la taille
+
+    return res;
 }
-#endif
 
+// Nouvelle fonction pour le streaming
+void SdMmc::read_file_stream(const char *path, size_t offset, size_t chunk_size, 
+                             std::function<void(const uint8_t*, size_t)> callback) {
+    std::string absolut_path = build_path(path);
+    FILE *file = fopen(absolut_path.c_str(), "rb");
+    if (!file) {
+        ESP_LOGE(TAG, "Failed to open file: %s", absolut_path.c_str());
+        return;
+    }
+
+    std::unique_ptr<FILE, decltype(&fclose)> file_guard(file, fclose);
+
+    if (fseek(file, offset, SEEK_SET) != 0) {
+        ESP_LOGE(TAG, "Failed to seek to position %zu in file: %s (errno: %d)", offset, absolut_path.c_str(), errno);
+        return;
+    }
+
+    std::vector<uint8_t> buffer(chunk_size);
+    size_t read;
+    
+    while ((read = fread(buffer.data(), 1, chunk_size, file)) > 0) {
+        callback(buffer.data(), read);  // Envoie les données par callback
+    }
+
+    if (ferror(file)) {
+        ESP_LOGE(TAG, "Error reading file: %s", absolut_path.c_str());
+    }
+}
+
+#endif
 size_t SdMmc::file_size(std::string const &path) { return this->file_size(path.c_str()); }
 
 bool SdMmc::is_directory(std::string const &path) { return this->is_directory(path.c_str()); }
