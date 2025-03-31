@@ -313,28 +313,27 @@ void Box3Web::handle_download(AsyncWebServerRequest *request, std::string const 
         return;
     }
 
-    // Utilisation de beginResponse_P pour le mode "chunked"
-    AsyncWebServerResponse *response = request->beginResponse_P(
-        200, content_type.c_str(),
-        fileSize,
-        [this, path](size_t index, uint8_t *buffer, size_t maxLen) -> size_t {
-            auto chunk = this->sd_mmc_card_->read_file_chunked(path, index, maxLen);
-            if (chunk.empty()) return 0; // Fin du fichier
-            memcpy(buffer, chunk.data(), chunk.size());
-            return chunk.size();
-        }
-    );
+    // Création d'un flux de réponse
+    AsyncWebServerResponseStream *response = request->beginResponseStream(content_type.c_str(), fileSize);
 
-    if (content_type == "audio/mpeg" || content_type == "audio/wav" ||
-        content_type == "video/mp4" || startsWith(content_type.c_str(), "image/")) {
-        response->addHeader("Accept-Ranges", "bytes");
+    size_t index = 0;
+    const size_t chunkSize = 1024;  // Taille des chunks à lire
+    std::vector<uint8_t> buffer(chunkSize);
+
+    while (index < fileSize) {
+        auto chunk = this->sd_mmc_card_->read_file_chunked(path, index, chunkSize);
+        if (chunk.empty()) break;
+        response->write(chunk.data(), chunk.size());
+        index += chunk.size();
     }
 
     response->addHeader("Content-Disposition", ("inline; filename=\"" + String(filename.c_str()) + "\"").c_str());
+    response->addHeader("Accept-Ranges", "bytes");
 
-    // Envoyer la réponse
+    // Envoi de la réponse au client
     request->send(response);
 }
+
 
 
 
