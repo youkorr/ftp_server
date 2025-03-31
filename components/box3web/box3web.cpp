@@ -301,7 +301,7 @@ void Box3Web::handle_download(AsyncWebServerRequest *request, std::string const 
     String content_type = get_content_type(path);
     std::string filename = Path::file_name(path);
 
-    // Vérification si le fichier existe en utilisant file_size
+    // Vérification de l'existence du fichier
     if (this->sd_mmc_card_->file_size(path.c_str()) < 0) {
         request->send(404, "application/json", "{ \"error\": \"file not found\" }");
         return;
@@ -313,11 +313,13 @@ void Box3Web::handle_download(AsyncWebServerRequest *request, std::string const 
         return;
     }
 
-    // Création d'une réponse en mode "chunked"
-    AsyncWebServerResponse *response = request->beginChunkedResponse(content_type.c_str(),
-        [this, path](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
+    // Utilisation de beginResponse_P pour le mode "chunked"
+    AsyncWebServerResponse *response = request->beginResponse_P(
+        200, content_type.c_str(),
+        fileSize,
+        [this, path](size_t index, uint8_t *buffer, size_t maxLen) -> size_t {
             auto chunk = this->sd_mmc_card_->read_file_chunked(path, index, maxLen);
-            if (chunk.empty()) return 0; // Fin de fichier
+            if (chunk.empty()) return 0; // Fin du fichier
             memcpy(buffer, chunk.data(), chunk.size());
             return chunk.size();
         }
