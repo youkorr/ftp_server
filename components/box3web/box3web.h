@@ -64,12 +64,7 @@ class StreamingFileResponse : public esphome::web_server_idf::AsyncWebServerResp
     memcpy(buffer, chunk.data(), chunk_size);
     this->index_ += chunk_size;
     return chunk_size;
-  protected:
-   sd_mmc_card::SdMmc *sd_card_;
-   std::string path_;
-   size_t file_size_;
-   size_t index_ = 0;
- };
+
   }
  private:
   web_server_base::WebServerBase *base_{nullptr};
@@ -95,6 +90,13 @@ class StreamingFileResponse : public esphome::web_server_idf::AsyncWebServerResp
   std::string build_absolute_path(std::string relative_path) const;
 
   const char *component_source_{nullptr};  // Variable pour set_component_source (facultatif)
+}
+ protected:
+   sd_mmc_card::SdMmc *sd_card_;
+   std::string path_;
+   size_t file_size_;
+   size_t index_ = 0;
+ 
 };
 
 }  // namespace box3web
