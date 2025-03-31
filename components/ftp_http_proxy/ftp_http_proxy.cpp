@@ -294,8 +294,8 @@ void FTPHTTPProxy::setup_http_server() {
   config.uri_match_fn = httpd_uri_match_wildcard;
   
   // Augmenter les limites pour gérer les grandes requêtes
-  config.recv_wait_timeout = 120;
-  config.send_wait_timeout = 120;
+  config.recv_wait_timeout = 20;
+  config.send_wait_timeout = 20;
   config.max_uri_handlers = 8;
   config.max_resp_headers = 20;
   config.stack_size = 12288;
