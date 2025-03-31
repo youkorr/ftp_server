@@ -353,11 +353,11 @@ void Box3Web::handle_delete(AsyncWebServerRequest *request) {
         return;
     }
 
-    if (!this->sd_mmc_card_->is_file(path)) {
-
+    if (this->sd_mmc_card_->file_size(path) == 0) {
         request->send(404, "application/json", "{ \"error\": \"file not found\" }");
         return;
     }
+
 
     if (!this->sd_mmc_card_->delete_file(path)) {
         ESP_LOGE("box3web", "Failed to delete file: %s", path.c_str());
