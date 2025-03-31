@@ -764,20 +764,7 @@ void FTPServer::start_file_download(int client_socket, const std::string& path) 
   close_data_connection(client_socket);
   send_response(client_socket, 226, "Transfer complete");
 }
-// Augmenter la taille de la pile et réduire la priorité
-xTaskCreate(
-    ftp_server_task,
-    "ftp_server",
-    8192,                         // Augmentez la taille de 4096 à 8192
-    NULL,
-    tskIDLE_PRIORITY + 1,         // Priorité plus basse
-    NULL
-);
-// Pendant le transfert de fichiers, réinitialiser le watchdog périodiquement
-if(bytes_transferred % 65536 == 0) { // Tous les 64K par exemple
-    esp_task_wdt_reset();            // Réinitialiser le watchdog
-    vTaskDelay(1);                   // Céder du temps aux autres tâches
-}  
+
 bool FTPServer::is_running() const {
   return ftp_server_socket_ != -1;
 }
