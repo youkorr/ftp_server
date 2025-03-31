@@ -346,27 +346,25 @@ void Box3Web::handle_delete(AsyncWebServerRequest *request) {
     std::string extracted = this->extract_path_from_url(std::string(request->url().c_str()));
     std::string path = this->build_absolute_path(extracted);
 
-    if (!this->sd_mmc_card_->file_exists(path)) {
-        request->send(404, "application/json", "{ \"error\": \"file not found\" }");
-        return;
-    }
+    ESP_LOGI("box3web", "Trying to delete: %s", path.c_str());
 
     if (this->sd_mmc_card_->is_directory(path)) {
         request->send(401, "application/json", "{ \"error\": \"cannot delete a directory\" }");
         return;
     }
 
-    if (!this->sd_mmc_card_->is_writable()) {
-        request->send(401, "application/json", "{ \"error\": \"SD card is read-only\" }");
+    if (!this->sd_mmc_card_->file_exists(path)) {
+        request->send(404, "application/json", "{ \"error\": \"file not found\" }");
         return;
     }
 
-    if (std::remove(path.c_str()) == 0) {
-        request->send(204, "application/json", "{}");
+    if (!this->sd_mmc_card_->delete_file(path)) {
+        ESP_LOGE("box3web", "Failed to delete file: %s", path.c_str());
+        request->send(401, "application/json", "{ \"error\": \"failed to delete file\" }");
         return;
     }
 
-    request->send(500, "application/json", "{ \"error\": \"failed to delete file\" }");
+    request->send(204, "application/json", "{}");
 }
 
 
