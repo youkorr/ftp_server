@@ -50,9 +50,9 @@ class StreamingFileResponse {
       // Ajout des en-têtes
       response->addHeader("Content-Disposition", ("attachment; filename=\"" + path_ + "\"").c_str());
       response->addHeader("Accept-Ranges", "bytes");
-      
-      // Correction : Convertir file_size_ en une chaîne de caractères
-      String file_size_str = String(file_size_);
+  
+      // Conversion correcte de file_size_ en chaîne de caractères
+      std::string file_size_str = std::to_string(file_size_);
       response->addHeader("Content-Length", file_size_str.c_str());
   
       size_t index = 0;
