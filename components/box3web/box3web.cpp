@@ -292,53 +292,52 @@ void Box3Web::handle_index(AsyncWebServerRequest *request, std::string const &pa
     request->send(response);
 }
 
-// Nouvelle implémentation de handle_download utilisant les API standard du SdMmc
-// Fixed implementation of handle_download using the SdMmc class's correct API methods
 void Box3Web::handle_download(AsyncWebServerRequest *request, std::string const &path) const {
     if (!this->download_enabled_) {
         request->send(401, "application/json", "{ \"error\": \"file download is disabled\" }");
         return;
     }
-    
+
     String content_type = get_content_type(path);
     std::string filename = Path::file_name(path);
-    
-    // Verify file exists - using appropriate method from SdMmc
-    // Replace is_file with exists
-    if (!this->sd_mmc_card_->exists(path.c_str())) {
+
+    // Vérification de l'existence du fichier avec is_file
+    if (!this->sd_mmc_card_->is_file(path)) {
         request->send(404, "application/json", "{ \"error\": \"file not found\" }");
         return;
     }
-    
-    // Check if it's a directory (we want a file, not a directory)
+
+    // Vérifier si c'est un répertoire
     if (this->sd_mmc_card_->is_directory(path)) {
         request->send(404, "application/json", "{ \"error\": \"path is a directory, not a file\" }");
         return;
     }
-    
-    size_t fileSize = this->sd_mmc_card_->file_size(path.c_str());
+
+    size_t fileSize = this->sd_mmc_card_->file_size(path);
     if (fileSize == 0) {
         request->send(404, "application/json", "{ \"error\": \"file is empty or cannot be read\" }");
         return;
     }
-    
-    // Create a proper response using the correct AsyncWebServerResponse constructor and method names
-    // Changed read_file_chunk to read_file_chunked
+
+    // Créer une réponse en envoyant des morceaux de fichier
     AsyncWebServerResponse *response = request->beginResponse(content_type.c_str(), fileSize, 
-        [this, path](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
-            return this->sd_mmc_card_->read_file_chunked(path.c_str(), buffer, maxLen, index);
+        [this, path](size_t index, size_t maxLen) -> std::string {
+            auto chunk = this->sd_mmc_card_->read_file_chunked(path, index, maxLen);
+            return std::string(chunk.begin(), chunk.end()); // Convertir en std::string
         }
     );
-    
+
     if (content_type == "audio/mpeg" || content_type == "audio/wav" ||
         content_type == "video/mp4" || startsWith(content_type.c_str(), "image/")) {
         response->addHeader("Accept-Ranges", "bytes");
     }
+
     response->addHeader("Content-Disposition", ("inline; filename=\"" + String(filename.c_str()) + "\"").c_str());
-    
-    // Send the response
+
+    // Envoyer la réponse
     request->send(response);
 }
+
 
 void Box3Web::handle_delete(AsyncWebServerRequest *request) {
     if (!this->deletion_enabled_) {
