@@ -301,33 +301,21 @@ void Box3Web::handle_download(AsyncWebServerRequest *request, const std::string 
     std::string filename = Path::file_name(path);
     String content_type = get_content_type(path);
 
-    // Vérification de l'existence du fichier
+    // Vérifier si le fichier existe
     size_t fileSize = this->sd_mmc_card_->file_size(path.c_str());
     if (fileSize == 0 || fileSize == static_cast<size_t>(-1)) {
         request->send(404, "application/json", "{ \"error\": \"file not found or empty\" }");
         return;
     }
 
-    // **Créer une réponse en flux sans tout stocker**
-    AsyncWebServerResponse *response = request->beginResponse(
-        content_type.c_str(), fileSize,
-        [this, path](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
-            // Lire directement un chunk du fichier depuis la SD
-            auto chunk = this->sd_mmc_card_->read_file_chunked(path, index, maxLen);
-            if (chunk.empty()) return 0; // Fin du fichier
-
-            // Copier le chunk dans le buffer pour envoi
-            memcpy(buffer, chunk.data(), chunk.size());
-            return chunk.size();
-        });
-
-    // Ajouter les en-têtes HTTP
+    // Utiliser la classe personnalisée pour le streaming
+    auto *response = new StreamingFileResponse(this->sd_mmc_card_, path, content_type.c_str(), fileSize);
     response->addHeader("Content-Disposition", ("attachment; filename=\"" + filename + "\"").c_str());
     response->addHeader("Accept-Ranges", "bytes");
 
-    // Envoyer la réponse immédiatement, sans la stocker en RAM
     request->send(response);
 }
+
 
 
 
