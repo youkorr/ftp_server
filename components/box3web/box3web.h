@@ -37,6 +37,40 @@ class Box3Web : public Component, public AsyncWebHandler {  // Héritage de Comp
   void handleRequest(AsyncWebServerRequest *request) override;
   void handleUpload(AsyncWebServerRequest *request, const String &filename, size_t index, uint8_t *data,
                     size_t len, bool final) override;
+class StreamingFileResponse : public esphome::web_server_base::AsyncWebServerResponse {
+ public:
+  StreamingFileResponse(sd_mmc_card::SdMmc *sd_card, const std::string &path, const std::string &content_type, size_t file_size)
+      : sd_card_(sd_card), path_(path), file_size_(file_size) {
+    this->code_ = 200;  // OK
+    this->content_length_ = file_size;
+    this->content_type_ = content_type;
+  }
+
+  void _respond(AsyncWebServerRequest *request) override {
+    this->_started = true;
+    this->index_ = 0;
+    this->buffer_.reserve(1024);  // Réservation de mémoire pour éviter trop d'allocations
+    this->_sendBuffer(request);
+  }
+
+  size_t _fillBuffer(uint8_t *buffer, size_t maxLen) override {
+    if (this->index_ >= this->file_size_) return 0;  // Fin du fichier
+
+    auto chunk = this->sd_card_->read_file_chunked(this->path_, this->index_, maxLen);
+    size_t chunk_size = chunk.size();
+    if (chunk_size == 0) return 0;  // Fin de lecture
+
+    memcpy(buffer, chunk.data(), chunk_size);
+    this->index_ += chunk_size;
+    return chunk_size;
+  }
+
+ protected:
+  sd_mmc_card::SdMmc *sd_card_;
+  std::string path_;
+  size_t file_size_;
+  size_t index_ = 0;
+};
 
  private:
   web_server_base::WebServerBase *base_{nullptr};
