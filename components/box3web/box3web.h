@@ -37,39 +37,36 @@ class Box3Web : public Component, public AsyncWebHandler {  // Héritage de Comp
   void handleRequest(AsyncWebServerRequest *request) override;
   void handleUpload(AsyncWebServerRequest *request, const String &filename, size_t index, uint8_t *data,
                     size_t len, bool final) override;
-class StreamingFileResponse : public esphome::web_server_base::AsyncWebServerResponse {
+class StreamingFileResponse {
  public:
   StreamingFileResponse(sd_mmc_card::SdMmc *sd_card, const std::string &path, const std::string &content_type, size_t file_size)
-      : sd_card_(sd_card), path_(path), file_size_(file_size) {
-    this->code_ = 200;  // OK
-    this->content_length_ = file_size;
-    this->content_type_ = content_type;
+      : sd_card_(sd_card), path_(path), content_type_(content_type), file_size_(file_size) {}
+
+  void stream_file(AsyncWebServerRequest *request) {
+    // Création d'une réponse en streaming
+    auto *response = request->beginResponseStream(content_type_.c_str());
+    response->setCode(200);  // Code de succès OK
+    response->addHeader("Content-Disposition", ("attachment; filename=\"" + path_ + "\"").c_str());
+    response->addHeader("Accept-Ranges", "bytes");
+
+    size_t index = 0;
+    const size_t chunk_size = 1024;
+    while (index < file_size_) {
+      auto chunk = this->sd_card_->read_file_chunked(path_, index, chunk_size);
+      if (chunk.empty()) break;
+      
+      response->write(chunk.data(), chunk.size());
+      index += chunk.size();
+    }
+
+    request->send(response);  // Envoi de la réponse au client
   }
 
-  void _respond(AsyncWebServerRequest *request) override {
-    this->_started = true;
-    this->index_ = 0;
-    this->buffer_.reserve(1024);  // Réservation de mémoire pour éviter trop d'allocations
-    this->_sendBuffer(request);
-  }
-
-  size_t _fillBuffer(uint8_t *buffer, size_t maxLen) override {
-    if (this->index_ >= this->file_size_) return 0;  // Fin du fichier
-
-    auto chunk = this->sd_card_->read_file_chunked(this->path_, this->index_, maxLen);
-    size_t chunk_size = chunk.size();
-    if (chunk_size == 0) return 0;  // Fin de lecture
-
-    memcpy(buffer, chunk.data(), chunk_size);
-    this->index_ += chunk_size;
-    return chunk_size;
-  }
-
- protected:
+ private:
   sd_mmc_card::SdMmc *sd_card_;
   std::string path_;
+  std::string content_type_;
   size_t file_size_;
-  size_t index_ = 0;
 };
 
  private:
