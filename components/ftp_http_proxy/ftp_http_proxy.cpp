@@ -94,6 +94,9 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   int flag = 1;
   int rcvbuf = 65536; // Augmenter la taille du buffer de réception à 64ko
 
+  // Déplacer la déclaration du vecteur ici, avant tous les goto
+  std::vector<char> file_buffer;
+
   // Connexion au serveur FTP
   if (!connect_to_ftp()) {
     ESP_LOGE(TAG, "Échec de connexion FTP");
@@ -170,7 +173,6 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   
   // Téléchargement en bloc unique pour des fichiers de taille moyenne
   // Au lieu de charger tout en mémoire ou de streamer petit à petit
-  std::vector<char> file_buffer;
   file_buffer.reserve(262144); // Pré-allouer 256ko
   
   while (true) {
