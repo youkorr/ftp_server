@@ -87,10 +87,12 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   char *pasv_start = nullptr;
   int data_port = 0;
   int ip[4], port[2]; 
-  char buffer[8192]; // Tampon de 1ko pour réception
+  
+  // Augmenter la taille du buffer pour accélérer le téléchargement
+  char buffer[32768]; // Tampon augmenté à 32ko pour des transferts plus rapides
   int bytes_received;
-  int flag = 1;  // Déplacé avant les goto
-  int rcvbuf = 16384; // Déplacé avant les goto
+  int flag = 1;
+  int rcvbuf = 65536; // Augmenter la taille du buffer de réception à 64ko
 
   // Connexion au serveur FTP
   if (!connect_to_ftp()) {
@@ -131,6 +133,9 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   
   // Augmenter la taille du buffer de réception pour le socket de données
   setsockopt(data_sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+  
+  // Configurer TCP_NODELAY pour désactiver l'algorithme de Nagle
+  setsockopt(data_sock, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
 
   struct sockaddr_in data_addr;
   memset(&data_addr, 0, sizeof(data_addr));
@@ -159,7 +164,15 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   buffer[bytes_received] = '\0';
   ESP_LOGD(TAG, "Réponse RETR: %s", buffer);
 
-  // Transfert en streaming avec un buffer plus petit pour éviter les problèmes de mémoire
+  // Configurer le type de transfert et les en-têtes pour un téléchargement plus rapide
+  httpd_resp_set_hdr(req, "Cache-Control", "max-age=3600");
+  httpd_resp_set_hdr(req, "Transfer-Encoding", "chunked");
+  
+  // Téléchargement en bloc unique pour des fichiers de taille moyenne
+  // Au lieu de charger tout en mémoire ou de streamer petit à petit
+  std::vector<char> file_buffer;
+  file_buffer.reserve(262144); // Pré-allouer 256ko
+  
   while (true) {
     bytes_received = recv(data_sock, buffer, sizeof(buffer), 0);
     if (bytes_received <= 0) {
@@ -169,14 +182,27 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
       break;
     }
 
-    esp_err_t err = httpd_resp_send_chunk(req, buffer, bytes_received);
+    // Ajouter les données au buffer
+    file_buffer.insert(file_buffer.end(), buffer, buffer + bytes_received);
+    
+    // Si le buffer devient trop grand, envoyer un chunk
+    if (file_buffer.size() >= 262144) { // 256ko
+      esp_err_t err = httpd_resp_send_chunk(req, file_buffer.data(), file_buffer.size());
+      if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Échec d'envoi au client: %d", err);
+        goto error;
+      }
+      file_buffer.clear();
+    }
+  }
+  
+  // Envoyer les données restantes
+  if (!file_buffer.empty()) {
+    esp_err_t err = httpd_resp_send_chunk(req, file_buffer.data(), file_buffer.size());
     if (err != ESP_OK) {
-      ESP_LOGE(TAG, "Échec d'envoi au client: %d", err);
+      ESP_LOGE(TAG, "Échec d'envoi final au client: %d", err);
       goto error;
     }
-    
-    // Petit délai pour permettre au TCP/IP stack de respirer
-    vTaskDelay(pdMS_TO_TICKS(1));
   }
 
   // Fermeture du socket de données
