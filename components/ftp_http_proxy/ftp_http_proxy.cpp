@@ -4,7 +4,8 @@
 #include <netdb.h>
 #include <cstring>
 #include <arpa/inet.h>
-#include "circular_buffer.h" // Inclure le nouveau header pour CircularBuffer
+#include "circular_buffer.h"
+#include "esp_task_wdt.h" // Ajouter pour la surveillance du watchdog
 
 static const char *TAG = "ftp_proxy";
 
@@ -34,6 +35,13 @@ bool FTPHTTPProxy::connect_to_ftp() {
   // Configuration du socket pour être plus robuste
   int flag = 1;
   setsockopt(sock_, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
+  
+  // Définir timeout pour les opérations socket
+  struct timeval timeout;
+  timeout.tv_sec = 5;
+  timeout.tv_usec = 0;
+  setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+  setsockopt(sock_, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
   
   // Augmenter la taille du buffer de réception
   int rcvbuf = 16384;
@@ -66,16 +74,34 @@ bool FTPHTTPProxy::connect_to_ftp() {
   snprintf(buffer, sizeof(buffer), "USER %s\r\n", username_.c_str());
   send(sock_, buffer, strlen(buffer), 0);
   bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received <= 0) {
+    ESP_LOGE(TAG, "Pas de réponse à la commande USER");
+    ::close(sock_);
+    sock_ = -1;
+    return false;
+  }
   buffer[bytes_received] = '\0';
 
   snprintf(buffer, sizeof(buffer), "PASS %s\r\n", password_.c_str());
   send(sock_, buffer, strlen(buffer), 0);
   bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received <= 0) {
+    ESP_LOGE(TAG, "Pas de réponse à la commande PASS");
+    ::close(sock_);
+    sock_ = -1;
+    return false;
+  }
   buffer[bytes_received] = '\0';
 
   // Mode binaire
   send(sock_, "TYPE I\r\n", 8, 0);
   bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received <= 0) {
+    ESP_LOGE(TAG, "Pas de réponse à la commande TYPE I");
+    ::close(sock_);
+    sock_ = -1;
+    return false;
+  }
   buffer[bytes_received] = '\0';
 
   return true;
@@ -85,10 +111,85 @@ bool FTPHTTPProxy::connect_to_ftp() {
 struct FTPReaderTaskData {
   int sock;
   CircularBuffer* buffer;
-  bool done;
+  volatile bool done;
+  volatile bool error;
+  TaskHandle_t task_handle;
   
-  FTPReaderTaskData(int s, CircularBuffer* b) : sock(s), buffer(b), done(false) {}
+  FTPReaderTaskData(int s, CircularBuffer* b) : 
+    sock(s), buffer(b), done(false), error(false), task_handle(nullptr) {}
 };
+
+// Fonction de tâche de lecture FTP
+static void ftp_reader_task(void* arg) {
+  auto* task_data = static_cast<FTPReaderTaskData*>(arg);
+  
+  // Enregistrer la tâche au watchdog
+  esp_task_wdt_add(nullptr);
+
+  char read_buffer[8192]; // Réduire la taille du buffer pour éviter les problèmes de pile
+  int total_received = 0;
+  
+  while (!task_data->done) {
+    // Réinitialiser le watchdog
+    esp_task_wdt_reset();
+    
+    int bytes = recv(task_data->sock, read_buffer, sizeof(read_buffer), 0);
+    if (bytes <= 0) {
+      if (bytes < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        ESP_LOGE(TAG, "Erreur de lecture FTP: %d", errno);
+        task_data->error = true;
+      }
+      break;
+    }
+    
+    total_received += bytes;
+    
+    // Remplir le buffer circulaire avec une limite d'essais
+    size_t written = 0;
+    int retry_count = 0;
+    const int max_retries = 50; // Limiter le nombre d'essais
+    
+    while (written < bytes && retry_count < max_retries) {
+      // Si le buffer est plein, attendre un peu mais avec un maximum d'essais
+      if (task_data->buffer->isFull()) {
+        retry_count++;
+        vTaskDelay(pdMS_TO_TICKS(20));
+        continue;
+      }
+      
+      // Écrire autant qu'on peut dans le buffer
+      size_t space = task_data->buffer->freeSpace();
+      size_t to_write = std::min(space, bytes - written);
+      size_t actual_written = task_data->buffer->write(read_buffer + written, to_write);
+      
+      written += actual_written;
+      
+      // Si on n'a pas pu écrire, attendre un peu
+      if (actual_written == 0) {
+        retry_count++;
+        vTaskDelay(pdMS_TO_TICKS(10));
+      } else {
+        retry_count = 0; // Réinitialiser le compteur car on a réussi à écrire
+      }
+    }
+    
+    // Si on n'a pas réussi à écrire tout le buffer après max_retries tentatives,
+    // signaler une erreur et arrêter
+    if (written < bytes) {
+      ESP_LOGE(TAG, "Impossible d'écrire dans le buffer circulaire après %d essais", max_retries);
+      task_data->error = true;
+      break;
+    }
+  }
+  
+  ESP_LOGI(TAG, "Tâche FTP reader terminée, %d octets reçus", total_received);
+  
+  // Se désinscrire du watchdog
+  esp_task_wdt_delete(nullptr);
+  
+  task_data->done = true;
+  vTaskDelete(NULL);
+}
 
 bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *req) {
   // Déclarations en haut pour éviter les goto cross-initialization
@@ -97,10 +198,16 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   char *pasv_start = nullptr;
   int data_port = 0;
   int ip[4], port[2]; 
-  char buffer[16384]; // Augmentation de la taille du buffer à 32 Ko
+  char buffer[8192]; // Taille du buffer réduite pour éviter les problèmes de pile
   int bytes_received;
   int flag = 1;
-  int rcvbuf = 32768; // Augmentation du buffer de réception à 64 Ko
+  int rcvbuf = 32768;
+  FTPReaderTaskData *task_data = nullptr;
+
+  // Configurer timeout pour éviter les blocages
+  struct timeval timeout;
+  timeout.tv_sec = 10;
+  timeout.tv_usec = 0;
 
   // Vérifier si c'est une requête de streaming audio
   bool is_streaming = false;
@@ -111,6 +218,7 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
     // Si c'est un fichier audio, considérer qu'il s'agit de streaming
     if (extension == ".mp3" || extension == ".wav" || extension == ".ogg") {
       is_streaming = true;
+      ESP_LOGI(TAG, "Mode streaming activé pour %s", extension.c_str());
     }
   }
 
@@ -150,6 +258,8 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
 
   // Configuration du socket de données pour être plus robuste
   setsockopt(data_sock, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
+  setsockopt(data_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+  setsockopt(data_sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
   
   // Augmenter la taille du buffer de réception pour le socket de données
   setsockopt(data_sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
@@ -182,96 +292,119 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   ESP_LOGD(TAG, "Réponse RETR: %s", buffer);
 
   if (is_streaming) {
-    // Pour le streaming, utiliser un buffer circulaire pour mise en cache
-    CircularBuffer stream_buffer(262144); // Buffer circulaire de 256 Ko
+    // Pour le streaming, utiliser un buffer circulaire plus petit pour éviter la fragmentation
+    // de la mémoire, mais suffisant pour un streaming fluide
+    CircularBuffer stream_buffer(131072); // Buffer circulaire de 128 Ko
     
     // Création des données pour la tâche
-    FTPReaderTaskData *task_data = new FTPReaderTaskData(data_sock, &stream_buffer);
+    task_data = new FTPReaderTaskData(data_sock, &stream_buffer);
     
-    // Démarrer une tâche de lecture FTP en arrière-plan
-    TaskHandle_t task_handle = nullptr;
+    // Démarrer une tâche de lecture FTP en arrière-plan avec une pile plus importante
     xTaskCreate(
-      [](void* arg) {
-        auto* task_data = static_cast<FTPReaderTaskData*>(arg);
-        
-        char read_buffer[16384];
-        while (!task_data->done) {
-          int bytes = recv(task_data->sock, read_buffer, sizeof(read_buffer), 0);
-          if (bytes <= 0) {
-            break;
-          }
-          
-          // Remplir le buffer circulaire
-          size_t written = 0;
-          while (written < bytes) {
-            // Si le buffer est plein, attendre un peu
-            if (task_data->buffer->isFull()) {
-              vTaskDelay(pdMS_TO_TICKS(10));
-              continue;
-            }
-            
-            written += task_data->buffer->write(read_buffer + written, bytes - written);
-          }
-        }
-        
-        vTaskDelete(NULL);
-      },
+      ftp_reader_task,
       "ftp_reader",
-      4096,
+      8192, // Augmenter à 8Ko pour éviter les débordements de pile
       task_data,
       5,
-      &task_handle
+      &task_data->task_handle
     );
     
+    if (task_data->task_handle == nullptr) {
+      ESP_LOGE(TAG, "Échec de création de la tâche FTP reader");
+      delete task_data;
+      task_data = nullptr;
+      goto error;
+    }
+    
     // Envoyer les données au client HTTP avec un débit contrôlé
-    const size_t chunk_size = 8192; // 8 Ko par chunk
+    const size_t chunk_size = 4096; // 4 Ko par chunk pour réduire l'utilisation de la pile
     char send_buffer[chunk_size];
     
     // Attendre que le buffer se remplisse suffisamment avant de commencer l'envoi
-    while (stream_buffer.available() < chunk_size * 4 && stream_buffer.available() < 65536) {
-      vTaskDelay(pdMS_TO_TICKS(100));
+    // mais avec un timeout pour éviter les blocages
+    int wait_count = 0;
+    while (stream_buffer.available() < chunk_size * 2 && stream_buffer.available() < 32768) {
+      vTaskDelay(pdMS_TO_TICKS(50));
+      wait_count++;
+      
+      // Timeout après 5 secondes d'attente (100 * 50ms)
+      if (wait_count > 100 || task_data->error || task_data->done) {
+        if (task_data->error) {
+          ESP_LOGE(TAG, "Erreur détectée lors du remplissage initial du buffer");
+        } else if (wait_count > 100) {
+          ESP_LOGW(TAG, "Timeout pendant le remplissage initial du buffer");
+        }
+        break;
+      }
     }
     
-    while (true) {
+    int empty_count = 0;
+    while (!task_data->error) {
       size_t available = stream_buffer.available();
+      
+      // Si aucune donnée n'est disponible, vérifier si c'est terminé
       if (available == 0) {
-        // Si aucune donnée n'est disponible pendant un certain temps, on considère que c'est terminé
-        vTaskDelay(pdMS_TO_TICKS(500));
-        if (stream_buffer.available() == 0) {
+        empty_count++;
+        
+        // Si le buffer est vide pendant un certain temps ou si la tâche a signalé la fin,
+        // on considère que c'est terminé
+        if (empty_count > 20 || task_data->done) {
+          ESP_LOGI(TAG, "Fin du streaming (buffer vide ou tâche terminée)");
           break;
         }
+        
+        vTaskDelay(pdMS_TO_TICKS(50));
         continue;
+      } else {
+        empty_count = 0; // Réinitialiser le compteur car on a des données
       }
       
       size_t to_read = std::min(available, chunk_size);
       size_t bytes_read = stream_buffer.read(send_buffer, to_read);
       
-      esp_err_t err = httpd_resp_send_chunk(req, send_buffer, bytes_read);
-      if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Échec d'envoi au client: %d", err);
-        // Marquer la tâche pour arrêt
-        task_data->done = true;
-        // Attendre que la tâche termine
-        vTaskDelay(pdMS_TO_TICKS(100));
-        delete task_data;
-        goto error;
+      if (bytes_read > 0) {
+        esp_err_t err = httpd_resp_send_chunk(req, send_buffer, bytes_read);
+        if (err != ESP_OK) {
+          ESP_LOGE(TAG, "Échec d'envoi au client: %d", err);
+          break;
+        }
       }
       
-      // Contrôler le débit pour le streaming
-      vTaskDelay(pdMS_TO_TICKS(1)); // Délai ajustable selon le débit souhaité
+      // Contrôler le débit pour le streaming, délai variable selon le niveau de remplissage
+      if (available > chunk_size * 4) {
+        // Si le buffer est bien rempli, on peut aller plus vite
+        vTaskDelay(pdMS_TO_TICKS(1));
+      } else {
+        // Si le buffer est peu rempli, on ralentit pour laisser le temps de le remplir
+        vTaskDelay(pdMS_TO_TICKS(5));
+      }
     }
     
-    // Marquer la tâche pour arrêt et nettoyer
+    // Arrêter la tâche proprement
     task_data->done = true;
-    vTaskDelay(pdMS_TO_TICKS(100));
+    
+    // Attendre que la tâche se termine mais avec un timeout
+    int timeout_counter = 0;
+    while (!task_data->done && timeout_counter < 50) {
+      vTaskDelay(pdMS_TO_TICKS(20));
+      timeout_counter++;
+    }
+    
+    // Supprimer la tâche si elle n'est pas terminée
+    if (task_data->task_handle != nullptr) {
+      vTaskDelete(task_data->task_handle);
+      task_data->task_handle = nullptr;
+    }
+    
     delete task_data;
+    task_data = nullptr;
     
   } else {
     // Transfert classique pour les fichiers non-streaming
     while (true) {
       bytes_received = recv(data_sock, buffer, sizeof(buffer), 0);
       if (bytes_received <= 0) {
-        if (bytes_received < 0) {
+        if (bytes_received < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
           ESP_LOGE(TAG, "Erreur de réception des données: %d", errno);
         }
         break;
@@ -283,7 +416,7 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
         goto error;
       }
       
-      // Petit délai plus court pour les fichiers normaux
+      // Petit délai pour permettre aux autres tâches de s'exécuter
       vTaskDelay(pdMS_TO_TICKS(1));
     }
   }
@@ -310,12 +443,34 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   return success;
 
 error:
+  // S'assurer que la tâche est arrêtée proprement
+  if (task_data != nullptr) {
+    task_data->done = true;
+    
+    // Attendre que la tâche se termine mais avec un timeout
+    int timeout_counter = 0;
+    while (!task_data->done && timeout_counter < 50) {
+      vTaskDelay(pdMS_TO_TICKS(20));
+      timeout_counter++;
+    }
+    
+    // Supprimer la tâche si elle n'est pas terminée
+    if (task_data->task_handle != nullptr) {
+      vTaskDelete(task_data->task_handle);
+    }
+    
+    delete task_data;
+  }
+  
   if (data_sock != -1) ::close(data_sock);
   if (sock_ != -1) {
     send(sock_, "QUIT\r\n", 6, 0);
     ::close(sock_);
     sock_ = -1;
   }
+  
+  // S'assurer d'envoyer une réponse d'erreur au client HTTP
+  httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Échec du téléchargement");
   return false;
 }
 
@@ -347,22 +502,20 @@ esp_err_t FTPHTTPProxy::http_req_handler(httpd_req_t *req) {
 
   // Définir les types MIME et headers selon le type de fichier
   if (extension == ".mp3") {
-    httpd_resp_set_type(req, "application/octet-stream");
-    std::string header = "attachment; filename=\"" + filename + "\"";
-    httpd_resp_set_hdr(req, "Content-Disposition", header.c_str());
-    ESP_LOGD(TAG, "Configuré pour téléchargement MP3");
+    httpd_resp_set_type(req, "audio/mpeg");
+    // Pour le streaming, ne pas utiliser Content-Disposition: attachment
+    // httpd_resp_set_hdr(req, "Content-Disposition", header.c_str());
+    ESP_LOGD(TAG, "Configuré pour streaming MP3");
   } else if (extension == ".wav") {
-    httpd_resp_set_type(req, "application/octet-stream");
-    std::string header = "attachment; filename=\"" + filename + "\"";
-    httpd_resp_set_hdr(req, "Content-Disposition", header.c_str());
-    ESP_LOGD(TAG, "Configuré pour téléchargement WAV");
+    httpd_resp_set_type(req, "audio/wav");
+    ESP_LOGD(TAG, "Configuré pour streaming WAV");
   } else if (extension == ".ogg") {
-    httpd_resp_set_type(req, "application/octet-stream");
-    std::string header = "attachment; filename=\"" + filename + "\"";
-    httpd_resp_set_hdr(req, "Content-Disposition", header.c_str());
-    ESP_LOGD(TAG, "Configuré pour téléchargement OGG");
+    httpd_resp_set_type(req, "audio/ogg");
+    ESP_LOGD(TAG, "Configuré pour streaming OGG");
   } else if (extension == ".pdf") {
     httpd_resp_set_type(req, "application/pdf");
+    std::string header = "attachment; filename=\"" + filename + "\"";
+    httpd_resp_set_hdr(req, "Content-Disposition", header.c_str());
   } else if (extension == ".jpg" || extension == ".jpeg") {
     httpd_resp_set_type(req, "image/jpeg");
   } else if (extension == ".png") {
@@ -386,7 +539,7 @@ esp_err_t FTPHTTPProxy::http_req_handler(httpd_req_t *req) {
         return ESP_OK;
       } else {
         ESP_LOGE(TAG, "Échec du téléchargement");
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Échec du téléchargement");
+        // La réponse d'erreur est déjà envoyée dans download_file
         return ESP_FAIL;
       }
     }
@@ -407,7 +560,7 @@ void FTPHTTPProxy::setup_http_server() {
   config.send_wait_timeout = 20;
   config.max_uri_handlers = 8;
   config.max_resp_headers = 20;
-  config.stack_size = 12288;
+  config.stack_size = 16384; // Augmenter à 16 Ko pour éviter les débordements de pile
 
   if (httpd_start(&server_, &config) != ESP_OK) {
     ESP_LOGE(TAG, "Échec du démarrage du serveur HTTP");
