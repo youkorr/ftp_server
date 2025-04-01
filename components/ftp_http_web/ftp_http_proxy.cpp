@@ -230,100 +230,106 @@ error:
 }
 
 bool FTPHTTPProxy::upload_file(const std::string &remote_path, const uint8_t *data, size_t size) {
-  int data_sock = -1;
-  bool success = false;
-  char *pasv_start = nullptr;
-  int data_port = 0;
-  int ip[4], port[2];
-  char buffer[1024];
-  int bytes_received;
+    int data_sock = -1;
+    bool success = false;
+    char *pasv_start = nullptr;
+    int data_port = 0;
+    int ip[4], port[2];
+    char buffer[1024];
+    int bytes_received;
+    int flag = 1;
+    int sndbuf = 16384;
 
-  // Connexion au serveur FTP
-  if (!connect_to_ftp()) {
-    ESP_LOGE(TAG, "Échec de connexion FTP pour l'upload");
-    return false;
-  }
-
-  // Mode passif
-  send(sock_, "PASV\r\n", 6, 0);
-  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
-  if (bytes_received <= 0 || !strstr(buffer, "227 ")) {
-    ESP_LOGE(TAG, "Erreur en mode passif pour l'upload");
-    goto error;
-  }
-  buffer[bytes_received] = '\0';
-
-  // Extraction des données de connexion
-  pasv_start = strchr(buffer, '(');
-  if (!pasv_start) {
-    ESP_LOGE(TAG, "Format PASV incorrect pour l'upload");
-    goto error;
-  }
-  sscanf(pasv_start, "(%d,%d,%d,%d,%d,%d)", &ip[0], &ip[1], &ip[2], &ip[3], &port[0], &port[1]);
-  data_port = port[0] * 256 + port[1];
-
-  // Création du socket de données
-  data_sock = ::socket(AF_INET, SOCK_STREAM, 0);
-  if (data_sock < 0) {
-    ESP_LOGE(TAG, "Échec de création du socket de données pour l'upload");
-    goto error;
-  }
-
-  struct sockaddr_in data_addr;
-  memset(&data_addr, 0, sizeof(data_addr));
-  data_addr.sin_family = AF_INET;
-  data_addr.sin_port = htons(data_port);
-  data_addr.sin_addr.s_addr = htonl((ip[0] << 24) | (ip[1] << 16) | (ip[2] << 8) | ip[3]);
-
-  if (::connect(data_sock, (struct sockaddr *)&data_addr, sizeof(data_addr)) != 0) {
-    ESP_LOGE(TAG, "Échec de connexion au port de données pour l'upload");
-    goto error;
-  }
-
-  // Envoi de la commande STOR
-  snprintf(buffer, sizeof(buffer), "STOR %s\r\n", remote_path.c_str());
-  ESP_LOGD(TAG, "Envoi de la commande: %s", buffer);
-  send(sock_, buffer, strlen(buffer), 0);
-
-  // Vérification de la réponse 150
-  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
-  if (bytes_received <= 0 || !strstr(buffer, "150 ")) {
-    ESP_LOGE(TAG, "Impossible de commencer l'upload");
-    goto error;
-  }
-
-  // Envoi des données
-  size_t total_sent = 0;
-  while (total_sent < size) {
-    size_t chunk_size = std::min(size_t(4096), size - total_sent);
-    int bytes_sent = send(data_sock, data + total_sent, chunk_size, 0);
-    if (bytes_sent <= 0) {
-      ESP_LOGE(TAG, "Erreur lors de l'envoi des données: %d", errno);
-      goto error;
+    // Step 1: Connect to FTP server
+    if (!connect_to_ftp()) {
+        ESP_LOGE(TAG, "Échec de connexion FTP pour l'upload");
+        return false;
     }
-    total_sent += bytes_sent;
-    vTaskDelay(pdMS_TO_TICKS(1)); // Petit délai pour éviter de surcharger le stack TCP/IP
-  }
 
-  // Fermeture du socket de données
-  ::close(data_sock);
-  data_sock = -1;
+    // Step 2: Enter passive mode
+    send(sock_, "PASV\r\n", 6, 0);
+    bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+    if (bytes_received <= 0 || !strstr(buffer, "227 ")) {
+        ESP_LOGE(TAG, "Erreur en mode passif pour l'upload");
+        return false;
+    }
+    buffer[bytes_received] = '\0';
 
-  // Vérification de la réponse finale 226
-  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
-  if (bytes_received > 0 && strstr(buffer, "226 ")) {
-    success = true;
-    ESP_LOGI(TAG, "Upload terminé avec succès");
-  } else {
-    ESP_LOGE(TAG, "Échec de confirmation de l'upload");
-  }
+    // Extract data connection details
+    pasv_start = strchr(buffer, '(');
+    if (!pasv_start) {
+        ESP_LOGE(TAG, "Format PASV incorrect pour l'upload");
+        return false;
+    }
+    sscanf(pasv_start, "(%d,%d,%d,%d,%d,%d)", &ip[0], &ip[1], &ip[2], &ip[3], &port[0], &port[1]);
+    data_port = port[0] * 256 + port[1];
 
-  // Fermeture de la connexion
-  send(sock_, "QUIT\r\n", 6, 0);
-  ::close(sock_);
-  sock_ = -1;
+    // Step 3: Create and connect data socket
+    data_sock = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (data_sock < 0) {
+        ESP_LOGE(TAG, "Échec de création du socket de données pour l'upload");
+        return false;
+    }
 
-  return success;
+    setsockopt(data_sock, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
+    setsockopt(data_sock, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+
+    struct sockaddr_in data_addr;
+    memset(&data_addr, 0, sizeof(data_addr));
+    data_addr.sin_family = AF_INET;
+    data_addr.sin_port = htons(data_port);
+    data_addr.sin_addr.s_addr = htonl((ip[0] << 24) | (ip[1] << 16) | (ip[2] << 8) | ip[3]);
+
+    if (::connect(data_sock, (struct sockaddr *)&data_addr, sizeof(data_addr)) != 0) {
+        ESP_LOGE(TAG, "Échec de connexion au port de données pour l'upload");
+        close(data_sock);
+        return false;
+    }
+
+    // Step 4: Send STOR command
+    snprintf(buffer, sizeof(buffer), "STOR %s\r\n", remote_path.c_str());
+    ESP_LOGD(TAG, "Envoi de la commande: %s", buffer);
+    send(sock_, buffer, strlen(buffer), 0);
+
+    // Verify response
+    bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+    if (bytes_received <= 0 || !strstr(buffer, "150 ")) {
+        ESP_LOGE(TAG, "Impossible de commencer l'upload");
+        close(data_sock);
+        return false;
+    }
+
+    // Step 5: Upload data in chunks
+    size_t total_sent = 0;
+    while (total_sent < size) {
+        size_t chunk_size = std::min(size_t(4096), size - total_sent);
+        int bytes_sent = send(data_sock, data + total_sent, chunk_size, 0);
+        if (bytes_sent <= 0) {
+            ESP_LOGE(TAG, "Erreur lors de l'envoi des données: %d", errno);
+            close(data_sock);
+            return false;
+        }
+        total_sent += bytes_sent;
+        vTaskDelay(pdMS_TO_TICKS(1)); // Small delay to avoid overloading the stack
+    }
+
+    // Step 6: Close data socket and verify response
+    close(data_sock);
+    bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+    if (bytes_received > 0 && strstr(buffer, "226 ")) {
+        success = true;
+        ESP_LOGI(TAG, "Upload terminé avec succès");
+    } else {
+        ESP_LOGE(TAG, "Échec de confirmation de l'upload");
+    }
+
+    // Finalize FTP session
+    send(sock_, "QUIT\r\n", 6, 0);
+    close(sock_);
+    sock_ = -1;
+
+    return success;
+}
 
 error:
   if (data_sock != -1) ::close(data_sock);
