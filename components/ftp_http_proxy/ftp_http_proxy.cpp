@@ -258,7 +258,7 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
       }
       
       // Contrôler le débit pour le streaming
-      vTaskDelay(pdMS_TO_TICKS(20)); // Délai ajustable selon le débit souhaité
+      vTaskDelay(pdMS_TO_TICKS(2)); // Délai ajustable selon le débit souhaité
     }
     
     // Marquer la tâche pour arrêt et nettoyer
