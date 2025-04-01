@@ -79,7 +79,16 @@ bool FTPHTTPProxy::connect_to_ftp() {
 
   return true;
 }
-
+bool is_streaming = false;
+std::string extension = "";
+size_t dot_pos = remote_path.find_last_of('.');
+if (dot_pos != std::string::npos) {
+  extension = remote_path.substr(dot_pos);
+  // Si c'est un fichier audio, considérer qu'il s'agit de streaming
+  if (extension == ".mp3" || extension == ".wav" || extension == ".flac" || extension == ".ogg") {
+    is_streaming = true;
+  }
+}
 bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *req) {
   // Déclarations en haut pour éviter les goto cross-initialization
   int data_sock = -1;
@@ -90,7 +99,7 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   char buffer[32768]; // Tampon de 1ko pour réception
   int bytes_received;
   int flag = 1;  // Déplacé avant les goto
-  int rcvbuf = 16384; // Déplacé avant les goto
+  int rcvbuf = 65536; // Déplacé avant les goto
 
   // Connexion au serveur FTP
   if (!connect_to_ftp()) {
