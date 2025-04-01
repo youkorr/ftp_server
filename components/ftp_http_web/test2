@@ -1,0 +1,746 @@
+#include "ftp_http_proxy.h"
+#include "esp_log.h"
+#include <lwip/sockets.h>
+#include <netdb.h>
+#include <cstring>
+#include <arpa/inet.h>
+#include <esp_vfs.h>
+#include <dirent.h>
+#include <sys/stat.h>
+
+static const char *TAG = "ftp_proxy";
+
+// HTML template pour l'interface web
+static const char *HTML_TEMPLATE = R"(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FTP File Manager</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; padding: 20px; max-width: 1000px; margin: 0 auto; }
+    h1 { color: #333; }
+    .file-list { width: 100%; border-collapse: collapse; margin-top: 20px; }
+    .file-list th, .file-list td { padding: 8px; text-align: left; border-bottom: 1px solid #ddd; }
+    .file-list tr:hover { background-color: #f5f5f5; }
+    .actions { display: flex; gap: 5px; }
+    .actions button { cursor: pointer; }
+    .form-group { margin-bottom: 15px; }
+    .form-group label { display: block; margin-bottom: 5px; }
+    .form-group input { width: 100%; padding: 8px; box-sizing: border-box; }
+    .btn { padding: 8px 16px; background: #4CAF50; color: white; border: none; cursor: pointer; }
+    .btn:hover { background: #45a049; }
+    .upload-section { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+    .modal { display: none; position: fixed; z-index: 1; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.4); }
+    .modal-content { background-color: #fefefe; margin: 15% auto; padding: 20px; border: 1px solid #888; width: 80%; max-width: 500px; }
+    .close { color: #aaa; float: right; font-size: 28px; font-weight: bold; cursor: pointer; }
+    .close:hover { color: black; }
+  </style>
+</head>
+<body>
+  <h1>FTP File Manager</h1>
+  
+  <div class="upload-section">
+    <h2>Upload File</h2>
+    <form id="uploadForm" enctype="multipart/form-data">
+      <div class="form-group">
+        <label for="fileInput">Select File:</label>
+        <input type="file" id="fileInput" name="file" required>
+      </div>
+      <div class="form-group">
+        <label for="remotePath">Remote Path (optional):</label>
+        <input type="text" id="remotePath" name="remotePath" placeholder="Enter remote path or leave empty for root">
+      </div>
+      <button type="submit" class="btn">Upload</button>
+    </form>
+  </div>
+
+  <h2>File List</h2>
+  <table class="file-list">
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Size</th>
+        <th>Last Modified</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody id="fileListBody">
+      <!-- Files will be listed here -->
+      %FILE_LIST%
+    </tbody>
+  </table>
+
+  <!-- Rename Modal -->
+  <div id="renameModal" class="modal">
+    <div class="modal-content">
+      <span class="close">&times;</span>
+      <h2>Rename File</h2>
+      <form id="renameForm">
+        <input type="hidden" id="oldFilename">
+        <div class="form-group">
+          <label for="newFilename">New Name:</label>
+          <input type="text" id="newFilename" required>
+        </div>
+        <button type="submit" class="btn">Rename</button>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    // JavaScript for handling user interactions
+    document.addEventListener('DOMContentLoaded', function() {
+      // Upload form handling
+      document.getElementById('uploadForm').addEventListener('submit', function(e) {
+        e.preventDefault();
+        const formData = new FormData(this);
+        
+        fetch('/api/upload', {
+          method: 'POST',
+          body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+          if(data.success) {
+            alert('File uploaded successfully!');
+            window.location.reload();
+          } else {
+            alert('Upload failed: ' + data.message);
+          }
+        })
+        .catch(error => {
+          alert('Upload error: ' + error);
+        });
+      });
+
+      // Delete file handling
+      document.querySelectorAll('.delete-btn').forEach(button => {
+        button.addEventListener('click', function() {
+          const filename = this.getAttribute('data-filename');
+          if(confirm('Are you sure you want to delete ' + filename + '?')) {
+            fetch('/api/delete', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({filename: filename})
+            })
+            .then(response => response.json())
+            .then(data => {
+              if(data.success) {
+                alert('File deleted successfully!');
+                window.location.reload();
+              } else {
+                alert('Delete failed: ' + data.message);
+              }
+            })
+            .catch(error => {
+              alert('Delete error: ' + error);
+            });
+          }
+        });
+      });
+
+      // Rename modal handling
+      const renameModal = document.getElementById('renameModal');
+      const closeBtn = document.querySelector('.close');
+      
+      document.querySelectorAll('.rename-btn').forEach(button => {
+        button.addEventListener('click', function() {
+          const filename = this.getAttribute('data-filename');
+          document.getElementById('oldFilename').value = filename;
+          document.getElementById('newFilename').value = filename;
+          renameModal.style.display = 'block';
+        });
+      });
+
+      closeBtn.addEventListener('click', function() {
+        renameModal.style.display = 'none';
+      });
+
+      window.addEventListener('click', function(event) {
+        if (event.target == renameModal) {
+          renameModal.style.display = 'none';
+        }
+      });
+
+      // Rename form handling
+      document.getElementById('renameForm').addEventListener('submit', function(e) {
+        e.preventDefault();
+        const oldFilename = document.getElementById('oldFilename').value;
+        const newFilename = document.getElementById('newFilename').value;
+        
+        fetch('/api/rename', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            oldFilename: oldFilename,
+            newFilename: newFilename
+          })
+        })
+        .then(response => response.json())
+        .then(data => {
+          if(data.success) {
+            alert('File renamed successfully!');
+            window.location.reload();
+          } else {
+            alert('Rename failed: ' + data.message);
+          }
+        })
+        .catch(error => {
+          alert('Rename error: ' + error);
+        });
+        
+        renameModal.style.display = 'none';
+      });
+    });
+  </script>
+</body>
+</html>
+)";
+
+namespace esphome {
+namespace ftp_http_proxy {
+
+// Structure pour les informations de fichier
+struct FileInfo {
+  std::string name;
+  size_t size;
+  time_t modified;
+};
+
+void FTPHTTPProxy::setup() {
+  ESP_LOGI(TAG, "Initialisation du proxy FTP/HTTP");
+  this->setup_http_server();
+}
+
+void FTPHTTPProxy::loop() {}
+
+bool FTPHTTPProxy::connect_to_ftp() {
+  struct hostent *ftp_host = gethostbyname(ftp_server_.c_str());
+  if (!ftp_host) {
+    ESP_LOGE(TAG, "Échec de la résolution DNS");
+    return false;
+  }
+
+  sock_ = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (sock_ < 0) {
+    ESP_LOGE(TAG, "Échec de création du socket : %d", errno);
+    return false;
+  }
+
+  // Configuration du socket pour être plus robuste
+  int flag = 1;
+  setsockopt(sock_, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
+  
+  // Augmenter la taille du buffer de réception
+  int rcvbuf = 16384;
+  setsockopt(sock_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+
+  struct sockaddr_in server_addr;
+  memset(&server_addr, 0, sizeof(server_addr));
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_port = htons(ftp_port_);
+  server_addr.sin_addr.s_addr = *((unsigned long *)ftp_host->h_addr);
+
+  if (::connect(sock_, (struct sockaddr *)&server_addr, sizeof(server_addr)) != 0) {
+    ESP_LOGE(TAG, "Échec de connexion FTP : %d", errno);
+    ::close(sock_);
+    sock_ = -1;
+    return false;
+  }
+
+  char buffer[512];
+  int bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received <= 0 || !strstr(buffer, "220 ")) {
+    ESP_LOGE(TAG, "Message de bienvenue FTP non reçu");
+    ::close(sock_);
+    sock_ = -1;
+    return false;
+  }
+  buffer[bytes_received] = '\0';
+
+  // Authentification
+  snprintf(buffer, sizeof(buffer), "USER %s\r\n", username_.c_str());
+  send(sock_, buffer, strlen(buffer), 0);
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  buffer[bytes_received] = '\0';
+
+  snprintf(buffer, sizeof(buffer), "PASS %s\r\n", password_.c_str());
+  send(sock_, buffer, strlen(buffer), 0);
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  buffer[bytes_received] = '\0';
+  
+  if (!strstr(buffer, "230 ")) {
+    ESP_LOGE(TAG, "Échec d'authentification FTP: %s", buffer);
+    ::close(sock_);
+    sock_ = -1;
+    return false;
+  }
+
+  return true;
+}
+
+bool FTPHTTPProxy::send_ftp_command(const std::string &cmd, std::string &response) {
+  char buffer[2048];
+  int bytes_received;
+
+  // Envoi de la commande
+  send(sock_, cmd.c_str(), cmd.length(), 0);
+  
+  // Réception de la réponse
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received <= 0) {
+    return false;
+  }
+  
+  buffer[bytes_received] = '\0';
+  response = buffer;
+  return true;
+}
+
+std::vector<FileInfo> FTPHTTPProxy::list_files() {
+  std::vector<FileInfo> files;
+  int data_sock = -1;
+  char buffer[2048];
+  std::string response;
+
+  if (!connect_to_ftp()) {
+    ESP_LOGE(TAG, "Échec de connexion FTP pour lister les fichiers");
+    return files;
+  }
+
+  // Mode binaire
+  send(sock_, "TYPE I\r\n", 8, 0);
+  recv(sock_, buffer, sizeof(buffer) - 1, 0);
+
+  // Mode passif
+  send(sock_, "PASV\r\n", 6, 0);
+  int bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received <= 0 || !strstr(buffer, "227 ")) {
+    goto cleanup;
+  }
+  buffer[bytes_received] = '\0';
+
+  // Extraction des données de connexion
+  char *pasv_start = strchr(buffer, '(');
+  if (!pasv_start) {
+    goto cleanup;
+  }
+
+  int ip[4], port[2];
+  sscanf(pasv_start, "(%d,%d,%d,%d,%d,%d)", &ip[0], &ip[1], &ip[2], &ip[3], &port[0], &port[1]);
+  int data_port = port[0] * 256 + port[1];
+
+  // Création du socket de données
+  data_sock = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (data_sock < 0) {
+    goto cleanup;
+  }
+
+  struct sockaddr_in data_addr;
+  memset(&data_addr, 0, sizeof(data_addr));
+  data_addr.sin_family = AF_INET;
+  data_addr.sin_port = htons(data_port);
+  data_addr.sin_addr.s_addr = htonl(
+      (ip[0] << 24) | (ip[1] << 16) | (ip[2] << 8) | ip[3]
+  );
+
+  if (::connect(data_sock, (struct sockaddr *)&data_addr, sizeof(data_addr)) != 0) {
+    goto cleanup;
+  }
+
+  // Envoi de la commande LIST
+  send(sock_, "LIST\r\n", 6, 0);
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  buffer[bytes_received] = '\0';
+
+  // Lecture des données
+  std::string list_data;
+  while (true) {
+    bytes_received = recv(data_sock, buffer, sizeof(buffer) - 1, 0);
+    if (bytes_received <= 0) {
+      break;
+    }
+    buffer[bytes_received] = '\0';
+    list_data += buffer;
+  }
+
+  // Traitement des données
+  std::istringstream iss(list_data);
+  std::string line;
+  while (std::getline(iss, line)) {
+    // Exemple format: -rw-r--r--    1 user     group        1024 Jan 01  2023 filename.txt
+    FileInfo file;
+    size_t last_space = line.find_last_of(' ');
+    if (last_space != std::string::npos) {
+      file.name = line.substr(last_space + 1);
+      
+      // Recherche de la taille
+      std::istringstream line_stream(line);
+      std::string token;
+      for (int i = 0; i < 5; i++) {
+        line_stream >> token;
+      }
+      file.size = std::stoul(token);
+      
+      // La date est approximative ici
+      file.modified = time(NULL);
+      
+      files.push_back(file);
+    }
+  }
+
+cleanup:
+  if (data_sock != -1) ::close(data_sock);
+  send(sock_, "QUIT\r\n", 6, 0);
+  ::close(sock_);
+  sock_ = -1;
+
+  return files;
+}
+
+bool FTPHTTPProxy::upload_file(const std::string &local_path, const std::string &remote_path) {
+  int data_sock = -1;
+  bool success = false;
+  char buffer[8192];
+  int bytes_received;
+  int bytes_read;
+  std::string response;
+
+  if (!connect_to_ftp()) {
+    ESP_LOGE(TAG, "Échec de connexion FTP pour upload");
+    return false;
+  }
+
+  // Mode binaire
+  send(sock_, "TYPE I\r\n", 8, 0);
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  buffer[bytes_received] = '\0';
+
+  // Mode passif
+  send(sock_, "PASV\r\n", 6, 0);
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received <= 0 || !strstr(buffer, "227 ")) {
+    goto error;
+  }
+  buffer[bytes_received] = '\0';
+
+  // Extraction des données de connexion
+  char *pasv_start = strchr(buffer, '(');
+  if (!pasv_start) {
+    goto error;
+  }
+
+  int ip[4], port[2];
+  sscanf(pasv_start, "(%d,%d,%d,%d,%d,%d)", &ip[0], &ip[1], &ip[2], &ip[3], &port[0], &port[1]);
+  int data_port = port[0] * 256 + port[1];
+
+  // Création du socket de données
+  data_sock = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (data_sock < 0) {
+    goto error;
+  }
+
+  struct sockaddr_in data_addr;
+  memset(&data_addr, 0, sizeof(data_addr));
+  data_addr.sin_family = AF_INET;
+  data_addr.sin_port = htons(data_port);
+  data_addr.sin_addr.s_addr = htonl(
+      (ip[0] << 24) | (ip[1] << 16) | (ip[2] << 8) | ip[3]
+  );
+
+  if (::connect(data_sock, (struct sockaddr *)&data_addr, sizeof(data_addr)) != 0) {
+    goto error;
+  }
+
+  // Envoi de la commande STOR
+  snprintf(buffer, sizeof(buffer), "STOR %s\r\n", remote_path.c_str());
+  send(sock_, buffer, strlen(buffer), 0);
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received <= 0 || !strstr(buffer, "150 ")) {
+    goto error;
+  }
+
+  // Ouverture du fichier local
+  FILE *fp = fopen(local_path.c_str(), "rb");
+  if (!fp) {
+    goto error;
+  }
+
+  // Transfert des données
+  while ((bytes_read = fread(buffer, 1, sizeof(buffer), fp)) > 0) {
+    if (send(data_sock, buffer, bytes_read, 0) != bytes_read) {
+      fclose(fp);
+      goto error;
+    }
+  }
+
+  fclose(fp);
+  ::close(data_sock);
+  data_sock = -1;
+
+  // Vérification de la réponse finale
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received > 0 && strstr(buffer, "226 ")) {
+    success = true;
+  }
+
+error:
+  if (data_sock != -1) ::close(data_sock);
+  send(sock_, "QUIT\r\n", 6, 0);
+  ::close(sock_);
+  sock_ = -1;
+
+  return success;
+}
+
+bool FTPHTTPProxy::delete_file(const std::string &remote_path) {
+  std::string response;
+  bool success = false;
+
+  if (!connect_to_ftp()) {
+    ESP_LOGE(TAG, "Échec de connexion FTP pour suppression");
+    return false;
+  }
+
+  // Envoi de la commande DELE
+  std::string cmd = "DELE " + remote_path + "\r\n";
+  if (send_ftp_command(cmd, response)) {
+    success = (response.find("250 ") != std::string::npos);
+  }
+
+  send(sock_, "QUIT\r\n", 6, 0);
+  ::close(sock_);
+  sock_ = -1;
+
+  return success;
+}
+
+bool FTPHTTPProxy::rename_file(const std::string &old_path, const std::string &new_path) {
+  std::string response;
+  bool success = false;
+
+  if (!connect_to_ftp()) {
+    ESP_LOGE(TAG, "Échec de connexion FTP pour renommage");
+    return false;
+  }
+
+  // Envoi de la commande RNFR (rename from)
+  std::string cmd = "RNFR " + old_path + "\r\n";
+  if (send_ftp_command(cmd, response) && response.find("350 ") != std::string::npos) {
+    // Envoi de la commande RNTO (rename to)
+    cmd = "RNTO " + new_path + "\r\n";
+    if (send_ftp_command(cmd, response)) {
+      success = (response.find("250 ") != std::string::npos);
+    }
+  }
+
+  send(sock_, "QUIT\r\n", 6, 0);
+  ::close(sock_);
+  sock_ = -1;
+
+  return success;
+}
+
+bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *req) {
+  // Déclarations en haut pour éviter les goto cross-initialization
+  int data_sock = -1;
+  bool success = false;
+  char *pasv_start = nullptr;
+  int data_port = 0;
+  int ip[4], port[2]; 
+  char buffer[8192]; // Tampon pour réception
+  int bytes_received;
+  int flag = 1;
+  int rcvbuf = 16384;
+
+  // Connexion au serveur FTP
+  if (!connect_to_ftp()) {
+    ESP_LOGE(TAG, "Échec de connexion FTP");
+    goto error;
+  }
+
+  // Mode binaire
+  send(sock_, "TYPE I\r\n", 8, 0);
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  buffer[bytes_received] = '\0';
+
+  // Mode passif
+  send(sock_, "PASV\r\n", 6, 0);
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received <= 0 || !strstr(buffer, "227 ")) {
+    ESP_LOGE(TAG, "Erreur en mode passif");
+    goto error;
+  }
+  buffer[bytes_received] = '\0';
+  ESP_LOGD(TAG, "Réponse PASV: %s", buffer);
+
+  // Extraction des données de connexion
+  pasv_start = strchr(buffer, '(');
+  if (!pasv_start) {
+    ESP_LOGE(TAG, "Format PASV incorrect");
+    goto error;
+  }
+
+  sscanf(pasv_start, "(%d,%d,%d,%d,%d,%d)", &ip[0], &ip[1], &ip[2], &ip[3], &port[0], &port[1]);
+  data_port = port[0] * 256 + port[1];
+  ESP_LOGD(TAG, "Port de données: %d", data_port);
+
+  // Création du socket de données
+  data_sock = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (data_sock < 0) {
+    ESP_LOGE(TAG, "Échec de création du socket de données");
+    goto error;
+  }
+
+  // Configuration du socket de données pour être plus robuste
+  setsockopt(data_sock, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
+  
+  // Augmenter la taille du buffer de réception pour le socket de données
+  setsockopt(data_sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+
+  struct sockaddr_in data_addr;
+  memset(&data_addr, 0, sizeof(data_addr));
+  data_addr.sin_family = AF_INET;
+  data_addr.sin_port = htons(data_port);
+  data_addr.sin_addr.s_addr = htonl(
+      (ip[0] << 24) | (ip[1] << 16) | (ip[2] << 8) | ip[3]
+  );
+
+  if (::connect(data_sock, (struct sockaddr *)&data_addr, sizeof(data_addr)) != 0) {
+    ESP_LOGE(TAG, "Échec de connexion au port de données");
+    goto error;
+  }
+
+  // Envoi de la commande RETR
+  snprintf(buffer, sizeof(buffer), "RETR %s\r\n", remote_path.c_str());
+  ESP_LOGD(TAG, "Envoi de la commande: %s", buffer);
+  send(sock_, buffer, strlen(buffer), 0);
+
+  // Vérification de la réponse 150
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received <= 0 || !strstr(buffer, "150 ")) {
+    ESP_LOGE(TAG, "Fichier non trouvé ou inaccessible");
+    goto error;
+  }
+  buffer[bytes_received] = '\0';
+  ESP_LOGD(TAG, "Réponse RETR: %s", buffer);
+
+  // Transfert en streaming
+  while (true) {
+    bytes_received = recv(data_sock, buffer, sizeof(buffer), 0);
+    if (bytes_received <= 0) {
+      if (bytes_received < 0) {
+        ESP_LOGE(TAG, "Erreur de réception des données: %d", errno);
+      }
+      break;
+    }
+
+    esp_err_t err = httpd_resp_send_chunk(req, buffer, bytes_received);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Échec d'envoi au client: %d", err);
+      goto error;
+    }
+    
+    // Petit délai pour permettre au TCP/IP stack de respirer
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
+
+  // Fermeture du socket de données
+  ::close(data_sock);
+  data_sock = -1;
+
+  // Vérification de la réponse finale 226
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received > 0 && strstr(buffer, "226 ")) {
+    success = true;
+    buffer[bytes_received] = '\0';
+    ESP_LOGD(TAG, "Transfert terminé: %s", buffer);
+  }
+
+  // Fermeture des sockets
+  send(sock_, "QUIT\r\n", 6, 0);
+  ::close(sock_);
+  sock_ = -1;
+
+  // Envoi du chunk final
+  httpd_resp_send_chunk(req, NULL, 0);
+  return success;
+
+error:
+  if (data_sock != -1) ::close(data_sock);
+  if (sock_ != -1) {
+    send(sock_, "QUIT\r\n", 6, 0);
+    ::close(sock_);
+    sock_ = -1;
+  }
+  return false;
+}
+
+// Gestionnaire pour l'API web
+esp_err_t FTPHTTPProxy::api_handler(httpd_req_t *req) {
+  auto *proxy = (FTPHTTPProxy *)req->user_ctx;
+  char buffer[512];
+  
+  // Déterminer l'endpoint
+  std::string uri = req->uri;
+  
+  // Endpoint pour lister les fichiers
+  if (uri == "/api/list") {
+    std::vector<FileInfo> files = proxy->list_files();
+    
+    // Construire la réponse JSON
+    std::string json = "{\"success\":true,\"files\":[";
+    for (size_t i = 0; i < files.size(); i++) {
+      if (i > 0) json += ",";
+      json += "{\"name\":\"" + files[i].name + "\",\"size\":" + std::to_string(files[i].size) + 
+              ",\"modified\":" + std::to_string(files[i].modified) + "}";
+    }
+    json += "]}";
+    
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json.c_str());
+    return ESP_OK;
+  }
+  
+  // Endpoint pour supprimer un fichier
+  if (uri == "/api/delete" && req->method == HTTP_POST) {
+    int content_len = req->content_len;
+    if (content_len > sizeof(buffer) - 1) {
+      content_len = sizeof(buffer) - 1;
+    }
+    int ret = httpd_req_recv(req, buffer, content_len);
+    if (ret <= 0) {
+      return ESP_FAIL;
+    }
+    buffer[ret] = '\0';
+    
+    // Extraire le nom du fichier (analyse JSON simplifiée)
+    char filename[256] = {0};
+    if (sscanf(buffer, "{\"filename\":\"%255[^\"]\"}", filename) != 1) {
+      httpd_resp_set_type(req, "application/json");
+      httpd_resp_sendstr(req, "{\"success\":false,\"message\":\"Invalid JSON format\"}");
+      return ESP_OK;
+    }
+    
+    bool success = proxy->delete_file(filename);
+    httpd_resp_set_type(req, "application/json");
+    if (success) {
+      httpd_resp_sendstr(req, "{\"success\":true,\"message\":\"File deleted successfully\"}");
+    } else {
+      httpd_resp_sendstr(req, "{\"success\":false,\"message\":\"Failed to delete file\"}");
+    }
+    return ESP_OK;
+  }
+  
+  // Endpoint pour renommer un fichier
+  if (uri == "/api/rename" && req->method == HTTP_POST) {
+    int content_len = req->content_len;
+    if (content_len > sizeof(buffer) - 1) {
+      content_len = sizeof(buffer) - 1;
+    }
+    int ret =
