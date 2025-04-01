@@ -302,7 +302,7 @@ bool FTPHTTPProxy::send_ftp_command(const std::string &cmd, std::string &respons
   return true;
 }
 
-std::vector<FileInfo> FTPHTTPProxy::list_files() {
+  std::vector<std::string> FTPHTTPProxy::list_files() {
   std::vector<FileInfo> files;
   int data_sock = -1;
   char buffer[2048];
@@ -404,6 +404,65 @@ cleanup:
 }
 
 bool FTPHTTPProxy::upload_file(const std::string &local_path, const std::string &remote_path) {
+  if (local_path.empty() || remote_path.empty()) {
+    ESP_LOGE(TAG, "Empty path specified");
+    return false;
+  }
+  
+  // Initialize variables before any potential jumps
+  FILE *fp = nullptr;
+  int data_sock = -1;
+  bool success = false;
+  char buffer[1024];
+  
+  // Connect to control socket
+  if (!send_command("PASV", buffer, sizeof(buffer))) {
+    ESP_LOGE(TAG, "Failed to enter passive mode");
+    goto cleanup;
+  }
+  
+  char *pasv_start = strchr(buffer, '(');
+  if (pasv_start == nullptr) {
+    ESP_LOGE(TAG, "Invalid PASV response");
+    goto cleanup;
+  }
+  
+  // Parse port details
+  uint8_t port[2];
+  if (sscanf(pasv_start, "(%*d,%*d,%*d,%*d,%hhu,%hhu)", &port[0], &port[1]) != 2) {
+    ESP_LOGE(TAG, "Failed to parse PASV response");
+    goto cleanup;
+  }
+  
+  int data_port = port[0] * 256 + port[1];
+  
+  // Open data connection
+  data_sock = socket(AF_INET, SOCK_STREAM, 0);
+  if (data_sock < 0) {
+    ESP_LOGE(TAG, "Failed to create data socket");
+    goto cleanup;
+  }
+  
+  cleanup:
+    // Cleanup
+    if (fp != nullptr) {
+      fclose(fp);
+    }
+    
+    if (data_sock >= 0) {
+      close(data_sock);
+    }
+    
+    return success;
+  }
+  
+  // Open local file
+  fp = fopen(local_path.c_str(), "rb");
+  if (fp == nullptr) {
+    ESP_LOGE(TAG, "Failed to open local file");
+    goto cleanup;
+  }
+  
   int data_sock = -1;
   bool success = false;
   char buffer[8192];
