@@ -1,0 +1,679 @@
+#include "ftp_http_proxy.h"
+#include "esp_log.h"
+#include <lwip/sockets.h>
+#include <netdb.h>
+#include <cstring>
+#include <arpa/inet.h>
+#include "web_interface.h" // Inclure le fichier d'en-tête pour l'interface web
+
+static const char *TAG = "ftp_proxy";
+
+namespace esphome {
+namespace ftp_http_proxy {
+
+void FTPHTTPProxy::setup() {
+  ESP_LOGI(TAG, "Initialisation du proxy FTP/HTTP");
+  this->setup_http_server();
+}
+
+void FTPHTTPProxy::loop() {}
+
+bool FTPHTTPProxy::connect_to_ftp() {
+  struct hostent *ftp_host = gethostbyname(ftp_server_.c_str());
+  if (!ftp_host) {
+    ESP_LOGE(TAG, "Échec de la résolution DNS");
+    return false;
+  }
+
+  sock_ = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (sock_ < 0) {
+    ESP_LOGE(TAG, "Échec de création du socket : %d", errno);
+    return false;
+  }
+
+  // Configuration du socket pour être plus robuste
+  int flag = 1;
+  setsockopt(sock_, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
+  
+  // Augmenter la taille du buffer de réception
+  int rcvbuf = 16384;
+  setsockopt(sock_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+
+  struct sockaddr_in server_addr;
+  memset(&server_addr, 0, sizeof(server_addr));
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_port = htons(ftp_port_);
+  server_addr.sin_addr.s_addr = *((unsigned long *)ftp_host->h_addr);
+
+  if (::connect(sock_, (struct sockaddr *)&server_addr, sizeof(server_addr)) != 0) {
+    ESP_LOGE(TAG, "Échec de connexion FTP : %d", errno);
+    ::close(sock_);
+    sock_ = -1;
+    return false;
+  }
+
+  char buffer[256];
+  int bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received <= 0 || !strstr(buffer, "220 ")) {
+    ESP_LOGE(TAG, "Message de bienvenue FTP non reçu");
+    ::close(sock_);
+    sock_ = -1;
+    return false;
+  }
+  buffer[bytes_received] = '\0';
+
+  // Authentification
+  snprintf(buffer, sizeof(buffer), "USER %s\r\n", username_.c_str());
+  send(sock_, buffer, strlen(buffer), 0);
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  buffer[bytes_received] = '\0';
+
+  snprintf(buffer, sizeof(buffer), "PASS %s\r\n", password_.c_str());
+  send(sock_, buffer, strlen(buffer), 0);
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  buffer[bytes_received] = '\0';
+  
+  if (!strstr(buffer, "230 ")) {
+    ESP_LOGE(TAG, "Authentification FTP échouée");
+    ::close(sock_);
+    sock_ = -1;
+    return false;
+  }
+
+  // Mode binaire
+  send(sock_, "TYPE I\r\n", 8, 0);
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  buffer[bytes_received] = '\0';
+
+  return true;
+}
+
+bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *req) {
+  // Déclarations en haut pour éviter les goto cross-initialization
+  int data_sock = -1;
+  bool success = false;
+  char *pasv_start = nullptr;
+  int data_port = 0;
+  int ip[4], port[2]; 
+  char buffer[8192]; // Tampon de 8ko pour réception
+  int bytes_received;
+  int flag = 1;  // Déplacé avant les goto
+  int rcvbuf = 16384; // Déplacé avant les goto
+
+  // Connexion au serveur FTP
+  if (!connect_to_ftp()) {
+    ESP_LOGE(TAG, "Échec de connexion FTP");
+    goto error;
+  }
+
+  // Mode passif
+  send(sock_, "PASV\r\n", 6, 0);
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received <= 0 || !strstr(buffer, "227 ")) {
+    ESP_LOGE(TAG, "Erreur en mode passif");
+    goto error;
+  }
+  buffer[bytes_received] = '\0';
+  ESP_LOGD(TAG, "Réponse PASV: %s", buffer);
+
+  // Extraction des données de connexion
+  pasv_start = strchr(buffer, '(');
+  if (!pasv_start) {
+    ESP_LOGE(TAG, "Format PASV incorrect");
+    goto error;
+  }
+
+  sscanf(pasv_start, "(%d,%d,%d,%d,%d,%d)", &ip[0], &ip[1], &ip[2], &ip[3], &port[0], &port[1]);
+  data_port = port[0] * 256 + port[1];
+  ESP_LOGD(TAG, "Port de données: %d", data_port);
+
+  // Création du socket de données
+  data_sock = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (data_sock < 0) {
+    ESP_LOGE(TAG, "Échec de création du socket de données");
+    goto error;
+  }
+
+  // Configuration du socket de données pour être plus robuste
+  setsockopt(data_sock, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
+  
+  // Augmenter la taille du buffer de réception pour le socket de données
+  setsockopt(data_sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+
+  struct sockaddr_in data_addr;
+  memset(&data_addr, 0, sizeof(data_addr));
+  data_addr.sin_family = AF_INET;
+  data_addr.sin_port = htons(data_port);
+  data_addr.sin_addr.s_addr = htonl(
+      (ip[0] << 24) | (ip[1] << 16) | (ip[2] << 8) | ip[3]
+  );
+
+  if (::connect(data_sock, (struct sockaddr *)&data_addr, sizeof(data_addr)) != 0) {
+    ESP_LOGE(TAG, "Échec de connexion au port de données");
+    goto error;
+  }
+
+  // Envoi de la commande RETR
+  snprintf(buffer, sizeof(buffer), "RETR %s\r\n", remote_path.c_str());
+  ESP_LOGD(TAG, "Envoi de la commande: %s", buffer);
+  send(sock_, buffer, strlen(buffer), 0);
+
+  // Vérification de la réponse 150
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received <= 0 || !strstr(buffer, "150 ")) {
+    ESP_LOGE(TAG, "Fichier non trouvé ou inaccessible");
+    goto error;
+  }
+  buffer[bytes_received] = '\0';
+  ESP_LOGD(TAG, "Réponse RETR: %s", buffer);
+
+  // Transfert en streaming avec un buffer plus petit pour éviter les problèmes de mémoire
+  while (true) {
+    bytes_received = recv(data_sock, buffer, sizeof(buffer), 0);
+    if (bytes_received <= 0) {
+      if (bytes_received < 0) {
+        ESP_LOGE(TAG, "Erreur de réception des données: %d", errno);
+      }
+      break;
+    }
+
+    esp_err_t err = httpd_resp_send_chunk(req, buffer, bytes_received);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Échec d'envoi au client: %d", err);
+      goto error;
+    }
+    
+    // Petit délai pour permettre au TCP/IP stack de respirer
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
+
+  // Fermeture du socket de données
+  ::close(data_sock);
+  data_sock = -1;
+
+  // Vérification de la réponse finale 226
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received > 0 && strstr(buffer, "226 ")) {
+    success = true;
+    buffer[bytes_received] = '\0';
+    ESP_LOGD(TAG, "Transfert terminé: %s", buffer);
+  }
+
+  // Fermeture des sockets
+  send(sock_, "QUIT\r\n", 6, 0);
+  ::close(sock_);
+  sock_ = -1;
+
+  // Envoi du chunk final
+  httpd_resp_send_chunk(req, NULL, 0);
+  return success;
+
+error:
+  if (data_sock != -1) ::close(data_sock);
+  if (sock_ != -1) {
+    send(sock_, "QUIT\r\n", 6, 0);
+    ::close(sock_);
+    sock_ = -1;
+  }
+  return false;
+}
+
+std::vector<FTPFileInfo> FTPHTTPProxy::list_directory(const std::string &directory) {
+  std::vector<FTPFileInfo> file_list;
+  int data_sock = -1;
+  char *pasv_start = nullptr;
+  int data_port = 0;
+  int ip[4], port[2]; 
+  char buffer[8192];
+  int bytes_received;
+  std::string response;
+  
+  // Connexion au serveur FTP
+  if (!connect_to_ftp()) {
+    ESP_LOGE(TAG, "Échec de connexion FTP pour listing");
+    return file_list;
+  }
+
+  // Mode passif
+  send(sock_, "PASV\r\n", 6, 0);
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received <= 0 || !strstr(buffer, "227 ")) {
+    ESP_LOGE(TAG, "Erreur en mode passif pour listing");
+    goto cleanup;
+  }
+  buffer[bytes_received] = '\0';
+
+  // Extraction des données de connexion
+  pasv_start = strchr(buffer, '(');
+  if (!pasv_start) {
+    ESP_LOGE(TAG, "Format PASV incorrect pour listing");
+    goto cleanup;
+  }
+
+  sscanf(pasv_start, "(%d,%d,%d,%d,%d,%d)", &ip[0], &ip[1], &ip[2], &ip[3], &port[0], &port[1]);
+  data_port = port[0] * 256 + port[1];
+
+  // Création du socket de données
+  data_sock = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (data_sock < 0) {
+    ESP_LOGE(TAG, "Échec de création du socket de données pour listing");
+    goto cleanup;
+  }
+
+  struct sockaddr_in data_addr;
+  memset(&data_addr, 0, sizeof(data_addr));
+  data_addr.sin_family = AF_INET;
+  data_addr.sin_port = htons(data_port);
+  data_addr.sin_addr.s_addr = htonl(
+      (ip[0] << 24) | (ip[1] << 16) | (ip[2] << 8) | ip[3]
+  );
+
+  if (::connect(data_sock, (struct sockaddr *)&data_addr, sizeof(data_addr)) != 0) {
+    ESP_LOGE(TAG, "Échec de connexion au port de données pour listing");
+    goto cleanup;
+  }
+
+  // Envoi de la commande LIST
+  if (!directory.empty()) {
+    snprintf(buffer, sizeof(buffer), "LIST %s\r\n", directory.c_str());
+  } else {
+    strcpy(buffer, "LIST\r\n");
+  }
+  send(sock_, buffer, strlen(buffer), 0);
+
+  // Vérification de la réponse 150
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received <= 0 || !strstr(buffer, "150 ")) {
+    ESP_LOGE(TAG, "Échec de la commande LIST");
+    goto cleanup;
+  }
+
+  // Recevoir la liste de fichiers
+  response.clear();
+  while (true) {
+    bytes_received = recv(data_sock, buffer, sizeof(buffer) - 1, 0);
+    if (bytes_received <= 0) break;
+    
+    buffer[bytes_received] = '\0';
+    response += buffer;
+  }
+
+  // Fermeture du socket de données
+  ::close(data_sock);
+  data_sock = -1;
+
+  // Vérification de la réponse finale 226
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received <= 0 || !strstr(buffer, "226 ")) {
+    ESP_LOGE(TAG, "Erreur lors du listing des fichiers");
+    goto cleanup;
+  }
+
+  // Parsing de la réponse pour extraire les noms de fichiers
+  if (!response.empty()) {
+    std::istringstream iss(response);
+    std::string line;
+    
+    while (std::getline(iss, line)) {
+      // Format Unix-style "drwxr-xr-x 2 user group 4096 Mar 16 17:30 dirname"
+      // ou "rwxr-xr-x 1 user group 4096 Mar 16 17:30 filename"
+      if (line.length() > 30) {
+        FTPFileInfo file_info;
+        file_info.is_directory = (line[0] == 'd');
+        
+        // Extraire le nom du fichier (dernière partie après l'espace)
+        size_t last_space = line.find_last_of(' ');
+        if (last_space != std::string::npos) {
+          file_info.name = line.substr(last_space + 1);
+          
+          // Utiliser une regex pour extraire la taille
+          // Dans un listing FTP typique, la taille est le 5ème champ
+          std::istringstream line_stream(line);
+          std::string permissions, links, owner, group, size_str;
+          line_stream >> permissions >> links >> owner >> group >> size_str;
+          
+          try {
+            file_info.size = std::stoll(size_str);
+          } catch (const std::exception&) {
+            file_info.size = 0;
+          }
+          
+          file_list.push_back(file_info);
+        }
+      }
+    }
+  }
+
+cleanup:
+  if (data_sock != -1) ::close(data_sock);
+  if (sock_ != -1) {
+    send(sock_, "QUIT\r\n", 6, 0);
+    ::close(sock_);
+    sock_ = -1;
+  }
+  return file_list;
+}
+
+bool FTPHTTPProxy::upload_file(const std::string &local_file_path, const std::string &remote_path, const char* data, size_t data_len) {
+  int data_sock = -1;
+  bool success = false;
+  char *pasv_start = nullptr;
+  int data_port = 0;
+  int ip[4], port[2]; 
+  char buffer[1024];
+  int bytes_received;
+  
+  // Connexion au serveur FTP
+  if (!connect_to_ftp()) {
+    ESP_LOGE(TAG, "Échec de connexion FTP pour upload");
+    return false;
+  }
+
+  // Mode passif
+  send(sock_, "PASV\r\n", 6, 0);
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received <= 0 || !strstr(buffer, "227 ")) {
+    ESP_LOGE(TAG, "Erreur en mode passif pour upload");
+    goto cleanup;
+  }
+  buffer[bytes_received] = '\0';
+
+  // Extraction des données de connexion
+  pasv_start = strchr(buffer, '(');
+  if (!pasv_start) {
+    ESP_LOGE(TAG, "Format PASV incorrect pour upload");
+    goto cleanup;
+  }
+
+  sscanf(pasv_start, "(%d,%d,%d,%d,%d,%d)", &ip[0], &ip[1], &ip[2], &ip[3], &port[0], &port[1]);
+  data_port = port[0] * 256 + port[1];
+
+  // Création du socket de données
+  data_sock = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (data_sock < 0) {
+    ESP_LOGE(TAG, "Échec de création du socket de données pour upload");
+    goto cleanup;
+  }
+
+  struct sockaddr_in data_addr;
+  memset(&data_addr, 0, sizeof(data_addr));
+  data_addr.sin_family = AF_INET;
+  data_addr.sin_port = htons(data_port);
+  data_addr.sin_addr.s_addr = htonl(
+      (ip[0] << 24) | (ip[1] << 16) | (ip[2] << 8) | ip[3]
+  );
+
+  if (::connect(data_sock, (struct sockaddr *)&data_addr, sizeof(data_addr)) != 0) {
+    ESP_LOGE(TAG, "Échec de connexion au port de données pour upload");
+    goto cleanup;
+  }
+
+  // Envoi de la commande STOR
+  snprintf(buffer, sizeof(buffer), "STOR %s\r\n", remote_path.c_str());
+  send(sock_, buffer, strlen(buffer), 0);
+
+  // Vérification de la réponse 150
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received <= 0 || !strstr(buffer, "150 ")) {
+    ESP_LOGE(TAG, "Échec de la commande STOR");
+    goto cleanup;
+  }
+
+  // Envoi des données du fichier
+  if (send(data_sock, data, data_len, 0) != (ssize_t)data_len) {
+    ESP_LOGE(TAG, "Erreur lors de l'envoi des données");
+    goto cleanup;
+  }
+
+  // Fermeture du socket de données
+  ::close(data_sock);
+  data_sock = -1;
+
+  // Vérification de la réponse finale 226
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received > 0 && strstr(buffer, "226 ")) {
+    success = true;
+  } else {
+    ESP_LOGE(TAG, "Erreur lors de l'upload du fichier");
+  }
+
+cleanup:
+  if (data_sock != -1) ::close(data_sock);
+  if (sock_ != -1) {
+    send(sock_, "QUIT\r\n", 6, 0);
+    ::close(sock_);
+    sock_ = -1;
+  }
+  return success;
+}
+
+bool FTPHTTPProxy::delete_file(const std::string &remote_path) {
+  char buffer[1024];
+  int bytes_received;
+  bool success = false;
+
+  // Connexion au serveur FTP
+  if (!connect_to_ftp()) {
+    ESP_LOGE(TAG, "Échec de connexion FTP pour suppression");
+    return false;
+  }
+
+  // Envoi de la commande DELE
+  snprintf(buffer, sizeof(buffer), "DELE %s\r\n", remote_path.c_str());
+  send(sock_, buffer, strlen(buffer), 0);
+
+  // Vérification de la réponse 250
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received > 0) {
+    buffer[bytes_received] = '\0';
+    if (strstr(buffer, "250 ")) {
+      success = true;
+    } else {
+      ESP_LOGE(TAG, "Échec de suppression du fichier: %s", buffer);
+    }
+  }
+
+  // Fermeture du socket
+  send(sock_, "QUIT\r\n", 6, 0);
+  ::close(sock_);
+  sock_ = -1;
+
+  return success;
+}
+
+bool FTPHTTPProxy::rename_file(const std::string &from_path, const std::string &to_path) {
+  char buffer[1024];
+  int bytes_received;
+  bool success = false;
+
+  // Connexion au serveur FTP
+  if (!connect_to_ftp()) {
+    ESP_LOGE(TAG, "Échec de connexion FTP pour renommage");
+    return false;
+  }
+
+  // Envoi de la commande RNFR (rename from)
+  snprintf(buffer, sizeof(buffer), "RNFR %s\r\n", from_path.c_str());
+  send(sock_, buffer, strlen(buffer), 0);
+
+  // Vérification de la réponse 350
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received <= 0 || !strstr(buffer, "350 ")) {
+    ESP_LOGE(TAG, "Échec de la commande RNFR");
+    goto cleanup;
+  }
+
+  // Envoi de la commande RNTO (rename to)
+  snprintf(buffer, sizeof(buffer), "RNTO %s\r\n", to_path.c_str());
+  send(sock_, buffer, strlen(buffer), 0);
+
+  // Vérification de la réponse 250
+  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  if (bytes_received > 0 && strstr(buffer, "250 ")) {
+    success = true;
+  } else {
+    ESP_LOGE(TAG, "Échec de la commande RNTO");
+  }
+
+cleanup:
+  // Fermeture du socket
+  send(sock_, "QUIT\r\n", 6, 0);
+  ::close(sock_);
+  sock_ = -1;
+
+  return success;
+}
+
+esp_err_t FTPHTTPProxy::handle_list_files(httpd_req_t *req) {
+  auto *proxy = (FTPHTTPProxy *)req->user_ctx;
+  
+  // Extraire le paramètre path de la requête
+  char path_buf[128] = {0};
+  size_t buf_len = sizeof(path_buf);
+  
+  httpd_req_get_url_query_str(req, path_buf, buf_len);
+  char param_buf[128] = {0};
+  httpd_query_key_value(path_buf, "path", param_buf, sizeof(param_buf));
+  
+  std::string directory = param_buf;
+  
+  // Obtenir la liste des fichiers
+  std::vector<FTPFileInfo> files = proxy->list_directory(directory);
+  
+  // Préparer la réponse JSON
+  cJSON *root = cJSON_CreateObject();
+  cJSON *files_array = cJSON_CreateArray();
+  
+  for (const auto &file : files) {
+    cJSON *file_obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(file_obj, "name", file.name.c_str());
+    cJSON_AddBoolToObject(file_obj, "is_directory", file.is_directory);
+    cJSON_AddNumberToObject(file_obj, "size", file.size);
+    cJSON_AddItemToArray(files_array, file_obj);
+  }
+  
+  cJSON_AddItemToObject(root, "files", files_array);
+  
+  // Convertir JSON en chaîne
+  char *json_str = cJSON_Print(root);
+  
+  // Configurer la réponse HTTP
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  
+  // Envoyer la réponse
+  httpd_resp_sendstr(req, json_str);
+  
+  // Libérer la mémoire
+  free(json_str);
+  cJSON_Delete(root);
+  
+  return ESP_OK;
+}
+
+esp_err_t FTPHTTPProxy::handle_upload_file(httpd_req_t *req) {
+  auto *proxy = (FTPHTTPProxy *)req->user_ctx;
+  esp_err_t res = ESP_OK;
+  
+  // Obtenir la taille du contenu
+  int content_length = req->content_len;
+  ESP_LOGI(TAG, "Upload de fichier, taille: %d", content_length);
+  
+  if (content_length <= 0) {
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Aucun contenu");
+    return ESP_FAIL;
+  }
+  
+  // Allouer un buffer pour les données du fichier
+  char *buf = (char *)malloc(content_length);
+  if (buf == NULL) {
+    ESP_LOGE(TAG, "Échec de l'allocation de mémoire pour l'upload");
+    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Mémoire insuffisante");
+    return ESP_FAIL;
+  }
+  
+  // Lire les données du fichier
+  int bytes_read = httpd_req_recv(req, buf, content_length);
+  if (bytes_read <= 0) {
+    ESP_LOGE(TAG, "Échec de la lecture des données");
+    free(buf);
+    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Échec de la lecture des données");
+    return ESP_FAIL;
+  }
+  
+  // Extraire le nom du fichier de la requête
+  char file_name[128] = {0};
+  size_t buf_len = sizeof(file_name);
+  
+  httpd_req_get_hdr_value_str(req, "X-Filename", file_name, buf_len);
+  if (file_name[0] == '\0') {
+    ESP_LOGE(TAG, "Nom de fichier non spécifié");
+    free(buf);
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Nom de fichier non spécifié");
+    return ESP_FAIL;
+  }
+  
+  // Extraire le chemin de destination
+  char dest_path[128] = {0};
+  buf_len = sizeof(dest_path);
+  
+  httpd_req_get_hdr_value_str(req, "X-Path", dest_path, buf_len);
+  
+  // Construire le chemin complet
+  std::string full_path;
+  if (dest_path[0] != '\0') {
+    full_path = std::string(dest_path) + "/" + file_name;
+  } else {
+    full_path = file_name;
+  }
+  
+  // Uploader le fichier vers le serveur FTP
+  if (proxy->upload_file("", full_path, buf, bytes_read)) {
+    // Succès
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_sendstr(req, "{\"success\":true}");
+  } else {
+    // Échec
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"Échec de l'upload\"}");
+    res = ESP_FAIL;
+  }
+  
+  free(buf);
+  return res;
+}
+
+esp_err_t FTPHTTPProxy::handle_delete_file(httpd_req_t *req) {
+  auto *proxy = (FTPHTTPProxy *)req->user_ctx;
+  
+  // Extraire le paramètre path de la requête
+  char path_buf[128] = {0};
+  size_t buf_len = sizeof(path_buf);
+  
+  httpd_req_get_url_query_str(req, path_buf, buf_len);
+  char param_buf[128] = {0};
+  httpd_query_key_value(path_buf, "path", param_buf, sizeof(param_buf));
+  
+  std::string file_path = param_buf;
+  
+  if (file_path.empty()) {
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_sendstr(req, "{\"success\":false,\"error\":\"Chemin non spécifié\"}");
+    return ESP_FAIL;
+  }
+  
+  // Supprimer le fichier
+  bool success = proxy->delete_file(file_path);
+  
+  // Configurer la réponse HTTP
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  
+  // Envoyer la réponse
+  if (success) {
+    httpd_resp_sendstr(req, "{\"success\":true}");
+  } else {
+    httpd_resp_sendstr(req, "{\"
