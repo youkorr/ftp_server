@@ -89,10 +89,10 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   int ip[4], port[2]; 
   
   // Augmenter la taille du buffer pour accélérer le téléchargement
-  char buffer[32768]; // Tampon augmenté à 32ko pour des transferts plus rapides
+  char buffer[8192]; // Tampon augmenté à 32ko pour des transferts plus rapides
   int bytes_received;
   int flag = 1;
-  int rcvbuf = 65536; // Augmenter la taille du buffer de réception à 64ko
+  int rcvbuf = 16384; // Augmenter la taille du buffer de réception à 64ko
 
   // Déplacer la déclaration du vecteur ici, avant tous les goto
   std::vector<char> file_buffer;
