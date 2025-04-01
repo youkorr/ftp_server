@@ -737,10 +737,276 @@ esp_err_t FTPHTTPProxy::api_handler(httpd_req_t *req) {
     return ESP_OK;
   }
   
-  // Endpoint pour renommer un fichier
+// Complétion de l'endpoint pour renommer un fichier
   if (uri == "/api/rename" && req->method == HTTP_POST) {
     int content_len = req->content_len;
     if (content_len > sizeof(buffer) - 1) {
       content_len = sizeof(buffer) - 1;
     }
-    int ret =
+    int ret = httpd_req_recv(req, buffer, content_len);
+    if (ret <= 0) {
+      return ESP_FAIL;
+    }
+    buffer[ret] = '\0';
+    
+    // Extraire les noms des fichiers (analyse JSON simplifiée)
+    char old_name[256] = {0};
+    char new_name[256] = {0};
+    if (sscanf(buffer, "{\"old_name\":\"%255[^\"]\",\"new_name\":\"%255[^\"]\"}", old_name, new_name) != 2) {
+      httpd_resp_set_type(req, "application/json");
+      httpd_resp_sendstr(req, "{\"success\":false,\"message\":\"Invalid JSON format\"}");
+      return ESP_OK;
+    }
+    
+    bool success = proxy->rename_file(old_name, new_name);
+    httpd_resp_set_type(req, "application/json");
+    if (success) {
+      httpd_resp_sendstr(req, "{\"success\":true,\"message\":\"File renamed successfully\"}");
+    } else {
+      httpd_resp_sendstr(req, "{\"success\":false,\"message\":\"Failed to rename file\"}");
+    }
+    return ESP_OK;
+  }
+  
+  // Endpoint pour télécharger un fichier
+  if (uri.find("/api/download/") == 0) {
+    std::string filename = uri.substr(14); // Extraire le nom après "/api/download/"
+    
+    // Définir les en-têtes de réponse
+    httpd_resp_set_type(req, "application/octet-stream");
+    std::string disposition = "attachment; filename=\"" + filename + "\"";
+    httpd_resp_set_hdr(req, "Content-Disposition", disposition.c_str());
+    
+    // Télécharger et streamer le fichier
+    bool success = proxy->download_file(filename, req);
+    if (!success) {
+      httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "File not found");
+    }
+    return ESP_OK;
+  }
+  
+  // Endpoint pour uploader un fichier
+  if (uri == "/api/upload" && req->method == HTTP_POST) {
+    // Obtenir le boundary du multipart form-data
+    char boundary[100];
+    char *content_type = nullptr;
+    if ((content_type = httpd_req_get_hdr_value_str(req, "Content-Type", boundary, sizeof(boundary) - 1)) == nullptr) {
+      httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Content-Type header not found");
+      return ESP_FAIL;
+    }
+    
+    // Extraire le boundary
+    char *boundary_start = strstr(content_type, "boundary=");
+    if (!boundary_start) {
+      httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Boundary not found in Content-Type");
+      return ESP_FAIL;
+    }
+    
+    boundary_start += 9; // Skip "boundary="
+    snprintf(boundary, sizeof(boundary), "--%s", boundary_start);
+    
+    // Créer un fichier temporaire
+    char temp_path[64];
+    snprintf(temp_path, sizeof(temp_path), "/tmp/upload_XXXXXX");
+    int fd = mkstemp(temp_path);
+    if (fd < 0) {
+      httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to create temp file");
+      return ESP_FAIL;
+    }
+    
+    FILE *fp = fdopen(fd, "wb");
+    if (!fp) {
+      close(fd);
+      unlink(temp_path);
+      httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to open temp file");
+      return ESP_FAIL;
+    }
+    
+    // Variables pour l'analyse multipart
+    char part_buf[1024];
+    bool is_file_data = false;
+    std::string filename;
+    
+    // Lire les données par morceaux
+    int remaining = req->content_len;
+    
+    while (remaining > 0) {
+      int recv_len = httpd_req_recv(req, part_buf, std::min(remaining, (int)sizeof(part_buf)));
+      if (recv_len <= 0) {
+        if (recv_len == HTTPD_SOCK_ERR_TIMEOUT) {
+          continue;
+        }
+        fclose(fp);
+        unlink(temp_path);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to receive data");
+        return ESP_FAIL;
+      }
+      
+      // Analyse basique multipart/form-data
+      if (!is_file_data) {
+        // Chercher le nom du fichier
+        char *filename_start = strstr(part_buf, "filename=\"");
+        if (filename_start) {
+          filename_start += 10; // Skip "filename=\""
+          char *filename_end = strchr(filename_start, '"');
+          if (filename_end) {
+            filename.assign(filename_start, filename_end - filename_start);
+          }
+        }
+        
+        // Chercher le début des données binaires (après deux retours à la ligne)
+        char *data_start = strstr(part_buf, "\r\n\r\n");
+        if (data_start) {
+          data_start += 4; // Skip "\r\n\r\n"
+          is_file_data = true;
+          
+          // Écrire seulement à partir du début des données
+          fwrite(data_start, 1, part_buf + recv_len - data_start, fp);
+        }
+      } else {
+        // Vérifier si nous avons atteint la boundary de fin
+        char *boundary_pos = std::search(part_buf, part_buf + recv_len, 
+                                        boundary, boundary + strlen(boundary));
+        
+        if (boundary_pos != part_buf + recv_len) {
+          // Écrire seulement jusqu'à la boundary
+          fwrite(part_buf, 1, boundary_pos - part_buf - 2, fp); // -2 pour ignorer \r\n
+          is_file_data = false;
+        } else {
+          // Écrire tout le morceau
+          fwrite(part_buf, 1, recv_len, fp);
+        }
+      }
+      
+      remaining -= recv_len;
+    }
+    
+    fclose(fp);
+    
+    // Uploader le fichier vers le serveur FTP
+    bool success = false;
+    if (!filename.empty()) {
+      success = proxy->upload_file(temp_path, filename);
+    }
+    
+    // Supprimer le fichier temporaire
+    unlink(temp_path);
+    
+    // Envoyer la réponse
+    httpd_resp_set_type(req, "application/json");
+    if (success) {
+      httpd_resp_sendstr(req, "{\"success\":true,\"message\":\"File uploaded successfully\"}");
+    } else {
+      httpd_resp_sendstr(req, "{\"success\":false,\"message\":\"Failed to upload file\"}");
+    }
+    
+    return ESP_OK;
+  }
+  
+  // Endpoint non trouvé
+  httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Endpoint not found");
+  return ESP_OK;
+}
+
+// Configuration du serveur HTTP
+void FTPHTTPProxy::setup_http_server() {
+  httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+  config.stack_size = 8192; // Augmenter la taille de la pile
+  config.max_uri_handlers = 10; // Augmenter le nombre max de gestionnaires
+  
+  ESP_LOGI(TAG, "Démarrage du serveur HTTP sur le port %d", config.server_port);
+  
+  if (httpd_start(&server_, &config) == ESP_OK) {
+    // Gestionnaire d'API
+    httpd_uri_t api_uri = {
+      .uri = "/api/*",
+      .method = HTTP_ANY,
+      .handler = FTPHTTPProxy::api_handler_wrapper,
+      .user_ctx = this
+    };
+    httpd_register_uri_handler(server_, &api_uri);
+    
+    // Gestionnaire pour fichiers statiques (interface web)
+    httpd_uri_t static_uri = {
+      .uri = "/*",
+      .method = HTTP_GET,
+      .handler = FTPHTTPProxy::static_handler,
+      .user_ctx = nullptr
+    };
+    httpd_register_uri_handler(server_, &static_uri);
+    
+    ESP_LOGI(TAG, "Serveur HTTP démarré avec succès");
+  } else {
+    ESP_LOGE(TAG, "Échec du démarrage du serveur HTTP");
+  }
+}
+
+// Wrapper statique pour le gestionnaire d'API
+esp_err_t FTPHTTPProxy::api_handler_wrapper(httpd_req_t *req) {
+  auto *proxy = (FTPHTTPProxy *)req->user_ctx;
+  return proxy->api_handler(req);
+}
+
+// Gestionnaire pour servir les fichiers statiques
+esp_err_t FTPHTTPProxy::static_handler(httpd_req_t *req) {
+  // Obtenir le chemin du fichier demandé
+  std::string uri = req->uri;
+  if (uri == "/") {
+    uri = "/index.html"; // Page par défaut
+  }
+  
+  // Déterminer le type MIME
+  const char *mime_type = "text/plain";
+  if (uri.ends_with(".html")) mime_type = "text/html";
+  else if (uri.ends_with(".css")) mime_type = "text/css";
+  else if (uri.ends_with(".js")) mime_type = "application/javascript";
+  else if (uri.ends_with(".png")) mime_type = "image/png";
+  else if (uri.ends_with(".jpg") || uri.ends_with(".jpeg")) mime_type = "image/jpeg";
+  else if (uri.ends_with(".ico")) mime_type = "image/x-icon";
+  
+  // Chemin complet dans la mémoire flash
+  std::string fs_path = "/www" + uri;
+  
+  // Ouvrir le fichier
+  FILE *fp = fopen(fs_path.c_str(), "rb");
+  if (!fp) {
+    httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "File not found");
+    return ESP_OK;
+  }
+  
+  // Définir le type MIME
+  httpd_resp_set_type(req, mime_type);
+  
+  // Buffer pour la lecture
+  char *chunk = (char *)malloc(STATIC_FILE_CHUNK_SIZE);
+  if (!chunk) {
+    fclose(fp);
+    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+    return ESP_FAIL;
+  }
+  
+  // Envoyer le fichier par morceaux
+  size_t bytes_read;
+  do {
+    bytes_read = fread(chunk, 1, STATIC_FILE_CHUNK_SIZE, fp);
+    if (bytes_read > 0) {
+      if (httpd_resp_send_chunk(req, chunk, bytes_read) != ESP_OK) {
+        fclose(fp);
+        free(chunk);
+        return ESP_FAIL;
+      }
+    }
+  } while (bytes_read == STATIC_FILE_CHUNK_SIZE);
+  
+  // Libérer les ressources
+  fclose(fp);
+  free(chunk);
+  
+  // Envoyer le chunk final (vide)
+  httpd_resp_send_chunk(req, NULL, 0);
+  
+  return ESP_OK;
+}
+
+} // namespace ftp_http_proxy
+} // namespace esphome
