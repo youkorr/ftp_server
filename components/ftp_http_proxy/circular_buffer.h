@@ -35,6 +35,13 @@ public:
     }
 
     /**
+     * @brief Get the free space available in the buffer
+     * 
+     * @return size_t Free space in bytes
+     */
+    size_t freeSpace() const {
+        return available_for_write();
+    }    /**
      * @brief Write data to the buffer
      * 
      * @param data Pointer to the data to write
