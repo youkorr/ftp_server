@@ -97,10 +97,10 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   char *pasv_start = nullptr;
   int data_port = 0;
   int ip[4], port[2]; 
-  char buffer[32768]; // Augmentation de la taille du buffer à 32 Ko
+  char buffer[16384]; // Augmentation de la taille du buffer à 32 Ko
   int bytes_received;
   int flag = 1;
-  int rcvbuf = 65536; // Augmentation du buffer de réception à 64 Ko
+  int rcvbuf = 32768; // Augmentation du buffer de réception à 64 Ko
 
   // Vérifier si c'est une requête de streaming audio
   bool is_streaming = false;
@@ -258,7 +258,7 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
       }
       
       // Contrôler le débit pour le streaming
-      vTaskDelay(pdMS_TO_TICKS(2)); // Délai ajustable selon le débit souhaité
+      vTaskDelay(pdMS_TO_TICKS(1)); // Délai ajustable selon le débit souhaité
     }
     
     // Marquer la tâche pour arrêt et nettoyer
