@@ -39,6 +39,7 @@ class FTPHTTPProxy : public Component {
   bool delete_file(const std::string &path);
   bool rename_file(const std::string &old_path, const std::string &new_path);
   bool create_directory(const std::string &path);
+  bool upload_file(const std::string &local_path, const std::string &remote_path);
 
  protected:
   std::string ftp_server_;
@@ -65,6 +66,11 @@ class FTPHTTPProxy : public Component {
   static esp_err_t http_api_handler(httpd_req_t *req);
   static esp_err_t http_ui_handler(httpd_req_t *req);
   static esp_err_t http_upload_handler(httpd_req_t *req);
+
+  // Add missing declarations
+  esp_err_t api_handler(httpd_req_t *req);
+  static esp_err_t api_handler_wrapper(httpd_req_t *req);
+  static esp_err_t static_handler(httpd_req_t *req)
   
   // Utilitaires
   std::string get_mime_type(const std::string &filename);
