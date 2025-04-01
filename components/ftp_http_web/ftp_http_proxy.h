@@ -33,7 +33,7 @@ class FTPHTTPProxy : public Component {
   
   // Nouvelles méthodes pour l'interface web
 
-  std::vector<std::string> list_files();
+  std::vector<FileInfo> list_files();
   std::vector<FTPFileInfo> list_directory(const std::string &path);
   bool upload_file(const std::string &path, const uint8_t *data, size_t size);
   bool delete_file(const std::string &path);
@@ -70,7 +70,7 @@ class FTPHTTPProxy : public Component {
   // Add missing declarations
   esp_err_t api_handler(httpd_req_t *req);
   static esp_err_t api_handler_wrapper(httpd_req_t *req);
-  static esp_err_t static_handler(httpd_req_t *req)
+  static esp_err_t static_handler(httpd_req_t *req);
   
   // Utilitaires
   std::string get_mime_type(const std::string &filename);
