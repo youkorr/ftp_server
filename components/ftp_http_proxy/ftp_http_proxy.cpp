@@ -173,7 +173,7 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   
   // Téléchargement en bloc unique pour des fichiers de taille moyenne
   // Au lieu de charger tout en mémoire ou de streamer petit à petit
-  file_buffer.reserve(262144); // Pré-allouer 256ko
+  file_buffer.reserve(16384); // Pré-allouer 256ko
   
   while (true) {
     bytes_received = recv(data_sock, buffer, sizeof(buffer), 0);
@@ -188,7 +188,7 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
     file_buffer.insert(file_buffer.end(), buffer, buffer + bytes_received);
     
     // Si le buffer devient trop grand, envoyer un chunk
-    if (file_buffer.size() >= 262144) { // 256ko
+    if (file_buffer.size() >= 16384) { // 256ko
       esp_err_t err = httpd_resp_send_chunk(req, file_buffer.data(), file_buffer.size());
       if (err != ESP_OK) {
         ESP_LOGE(TAG, "Échec d'envoi au client: %d", err);
