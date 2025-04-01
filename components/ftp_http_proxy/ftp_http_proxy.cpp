@@ -176,7 +176,7 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
     }
     
     // Petit délai pour permettre au TCP/IP stack de respirer
-    vTaskDelay(pdMS_TO_TICKS(20));
+    vTaskDelay(pdMS_TO_TICKS(2));
   }
 
   // Fermeture du socket de données
