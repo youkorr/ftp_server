@@ -4,8 +4,14 @@
 #include <netdb.h>
 #include <cstring>
 #include <arpa/inet.h>
+#include "esp_task_wdt.h"
 
 static const char *TAG = "ftp_proxy";
+
+// Taille du buffer optimisée pour les transferts
+#define DOWNLOAD_BUFFER_SIZE 4092
+// Nombre maximal d'octets à transférer avant de réinitialiser le WDT
+#define WDT_RESET_THRESHOLD (1024 * 512) // 512 KB
 
 namespace esphome {
 namespace ftp_http_proxy {
@@ -32,7 +38,11 @@ void FTPHTTPProxy::setup() {
   this->setup_http_server();
 }
 
-void FTPHTTPProxy::loop() {}
+void FTPHTTPProxy::loop() {
+  // Réinitialiser périodiquement le WDT dans la boucle principale
+  esp_task_wdt_reset();
+}
+
 
 bool FTPHTTPProxy::connect_to_ftp() {
   struct hostent *ftp_host = gethostbyname(ftp_server_.c_str());
