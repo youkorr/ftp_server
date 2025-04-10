@@ -12,6 +12,23 @@ namespace ftp_http_proxy {
 
 void FTPHTTPProxy::setup() {
   ESP_LOGI(TAG, "Initialisation du proxy FTP/HTTP");
+  
+  // Configuration du WDT avec un délai plus long pour les gros fichiers
+  esp_task_wdt_config_t wdt_config = {
+    .timeout_ms = 60000,  // 60 secondes au lieu de 30
+    .idle_core_mask = 0,  // Pas de cores idle 
+    .trigger_panic = false // Ne pas déclencher de panique
+  };
+  esp_task_wdt_init(&wdt_config);
+  
+  // Obtention du handle de la tâche courante
+  TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
+  
+  // Enregistrement de la tâche avec le handle spécifique
+  esp_task_wdt_add(current_task);
+  
+  ESP_LOGI(TAG, "Task Watchdog configuré pour la tâche principale");
+  
   this->setup_http_server();
 }
 
