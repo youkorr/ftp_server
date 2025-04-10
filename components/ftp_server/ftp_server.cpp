@@ -753,7 +753,7 @@ void FTPServer::start_file_download(int client_socket, const std::string& path) 
     return;
   }
 
-  char buffer[8192];
+  char buffer[2048];
   int len;
   while ((len = read(file_fd, buffer, sizeof(buffer))) > 0) {
     send(data_socket, buffer, len, 0);
