@@ -324,8 +324,8 @@ void FTPHTTPProxy::setup_http_server() {
   config.recv_wait_timeout = 20;
   config.send_wait_timeout = 20;
   config.max_uri_handlers = 8;
-  config.max_resp_headers = 20;
-  config.stack_size = 12288;
+  config.max_resp_headers = 16;
+  config.stack_size = 8192;
 
   if (httpd_start(&server_, &config) != ESP_OK) {
     ESP_LOGE(TAG, "Échec du démarrage du serveur HTTP");
