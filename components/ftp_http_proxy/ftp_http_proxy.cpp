@@ -20,7 +20,7 @@ void FTPHTTPProxy::setup() {
   
   // Configuration du watchdog avec un délai plus long
   esp_task_wdt_config_t wdt_config = {
-    .timeout_ms = 15000,  // Augmenté à 15 secondes (au lieu de 10s)
+    .timeout_ms = 60000,  // Augmenté à 15 secondes (au lieu de 10s)
     .idle_core_mask = 0,  // Sans surveillance des cœurs inactifs
     .trigger_panic = false // Ne pas paniquer en cas de timeout - juste un log
   };
