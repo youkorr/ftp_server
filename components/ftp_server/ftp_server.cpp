@@ -741,28 +741,71 @@ void FTPServer::start_file_upload(int client_socket, const std::string& path) {
 void FTPServer::start_file_download(int client_socket, const std::string& path) {
   int data_socket = open_data_connection(client_socket);
   if (data_socket < 0) {
+    ESP_LOGE(TAG, "Failed to open data connection for download");
     send_response(client_socket, 425, "Can't open data connection");
     return;
   }
 
   int file_fd = open(path.c_str(), O_RDONLY);
   if (file_fd < 0) {
+    ESP_LOGE(TAG, "Failed to open file for reading: %s (errno: %d)", path.c_str(), errno);
     close(data_socket);
     close_data_connection(client_socket);
     send_response(client_socket, 550, "Failed to open file for reading");
     return;
   }
 
-  char buffer[2048];
+  // Set socket timeout
+  struct timeval timeout;
+  timeout.tv_sec = 30;  // 30 seconds timeout
+  timeout.tv_usec = 0;
+  if (setsockopt(data_socket, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) < 0) {
+    ESP_LOGW(TAG, "Could not set socket send timeout (errno: %d)", errno);
+  }
+
+  // Increase buffer size for larger files
+  const size_t buffer_size = 8192;  // 8KB buffer
+  char buffer[buffer_size];
   int len;
-  while ((len = read(file_fd, buffer, sizeof(buffer))) > 0) {
-    send(data_socket, buffer, len, 0);
+  size_t total_sent = 0;
+  
+  while ((len = read(file_fd, buffer, buffer_size)) > 0) {
+    int sent = 0;
+    while (sent < len) {
+      int result = send(data_socket, buffer + sent, len - sent, 0);
+      if (result < 0) {
+        if (errno == EINTR) {
+          // Interrupted, try again
+          continue;
+        }
+        ESP_LOGE(TAG, "Error sending data: %d", errno);
+        close(file_fd);
+        close(data_socket);
+        close_data_connection(client_socket);
+        send_response(client_socket, 426, "Connection closed; transfer aborted");
+        return;
+      }
+      sent += result;
+    }
+    total_sent += len;
+    ESP_LOGD(TAG, "Sent %d bytes, total: %d", len, total_sent);
+  }
+
+  // Check for read errors
+  if (len < 0) {
+    ESP_LOGE(TAG, "Error reading file: %d", errno);
+    close(file_fd);
+    close(data_socket);
+    close_data_connection(client_socket);
+    send_response(client_socket, 551, "Error reading file");
+    return;
   }
 
   close(file_fd);
   close(data_socket);
   close_data_connection(client_socket);
   send_response(client_socket, 226, "Transfer complete");
+}
 }
 
 bool FTPServer::is_running() const {
