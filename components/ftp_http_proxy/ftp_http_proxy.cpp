@@ -100,18 +100,30 @@ bool FTPHTTPProxy::connect_to_ftp() {
 }
 
 bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *req) {
+  // Variables pour le streaming des fichiers
+  bool is_media_file = false;
+  size_t bytes_since_reset = 0;
+  size_t total_bytes_transferred = 0;
+  int chunk_count = 0;
+
   // Déclarations en haut pour éviter les goto cross-initialization
   int data_sock = -1;
   bool success = false;
   char *pasv_start = nullptr;
   int data_port = 0;
   int ip[4], port[2]; 
-  char buffer[8192]; // Tampon de 1ko pour réception
   int bytes_received;
   int flag = 1;  // Déplacé avant les goto
   int rcvbuf = 16384; // Déplacé avant les goto
 
-    // Obtenir le handle de la tâche actuelle pour le watchdog
+  // Déterminer si c'est un fichier média basé sur l'extension
+  size_t dot_pos = remote_path.find_last_of('.');
+  if (dot_pos != std::string::npos) {
+    std::string ext = remote_path.substr(dot_pos);
+    is_media_file = (ext == ".mp3" || ext == ".wav" || ext == ".ogg" || ext == ".mp4");
+  }
+
+  // Obtenir le handle de la tâche actuelle pour le watchdog
   TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
   bool wdt_initialized = false;
   
@@ -128,7 +140,7 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
     ESP_LOGI(TAG, "Tâche déjà dans le watchdog");
   }
   
-    // Ajuster la taille du buffer pour optimiser les performances
+  // Ajuster la taille du buffer pour optimiser les performances
   // Pour les fichiers média, utiliser un buffer plus petit pour des réponses plus fréquentes
   int buffer_size = is_media_file ? 4096 : 8192;
   
@@ -145,11 +157,14 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
 
   if (!connect_to_ftp()) {
     ESP_LOGE(TAG, "Échec de connexion FTP");
-    goto error;
+    if (buffer) heap_caps_free(buffer);
+    if (wdt_initialized) esp_task_wdt_delete(current_task);
+    return false;
   }
+
   // Mode passif
   send(sock_, "PASV\r\n", 6, 0);
-  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  bytes_received = recv(sock_, buffer, buffer_size - 1, 0);
   if (bytes_received <= 0 || !strstr(buffer, "227 ")) {
     ESP_LOGE(TAG, "Erreur en mode passif");
     goto error;
@@ -195,12 +210,12 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   }
 
   // Envoi de la commande RETR
-  snprintf(buffer, sizeof(buffer), "RETR %s\r\n", remote_path.c_str());
+  snprintf(buffer, buffer_size, "RETR %s\r\n", remote_path.c_str());
   ESP_LOGD(TAG, "Envoi de la commande: %s", buffer);
   send(sock_, buffer, strlen(buffer), 0);
 
   // Vérification de la réponse 150
-  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  bytes_received = recv(sock_, buffer, buffer_size - 1, 0);
   if (bytes_received <= 0 || !strstr(buffer, "150 ")) {
     ESP_LOGE(TAG, "Fichier non trouvé ou inaccessible");
     goto error;
@@ -210,14 +225,19 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
 
   // Transfert en streaming avec un buffer plus petit pour éviter les problèmes de mémoire
   while (true) {
-    bytes_received = recv(data_sock, buffer, sizeof(buffer), 0);
+    bytes_received = recv(data_sock, buffer, buffer_size, 0);
     if (bytes_received <= 0) {
       if (bytes_received < 0) {
         ESP_LOGE(TAG, "Erreur de réception des données: %d", errno);
       }
       break;
     }
-      // Pour les fichiers média, réinitialiser le watchdog tous les ~100Ko
+
+    // Mettre à jour les compteurs de bytes
+    total_bytes_transferred += bytes_received;
+    bytes_since_reset += bytes_received;
+    
+    // Pour les fichiers média, réinitialiser le watchdog tous les ~100Ko
     if (is_media_file && bytes_since_reset >= 102400 && wdt_initialized) {
       esp_task_wdt_reset();
       bytes_since_reset = 0;
@@ -243,22 +263,13 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
       vTaskDelay(pdMS_TO_TICKS(1));
     }
   }
-    esp_err_t err = httpd_resp_send_chunk(req, buffer, bytes_received);
-    if (err != ESP_OK) {
-      ESP_LOGE(TAG, "Échec d'envoi au client: %d", err);
-      goto error;
-    }
-    
-    // Petit délai pour permettre au TCP/IP stack de respirer
-    vTaskDelay(pdMS_TO_TICKS(1));
-  }
 
   // Fermeture du socket de données
   ::close(data_sock);
   data_sock = -1;
 
   // Vérification de la réponse finale 226
-  bytes_received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
+  bytes_received = recv(sock_, buffer, buffer_size - 1, 0);
   if (bytes_received > 0 && strstr(buffer, "226 ")) {
     success = true;
     buffer[bytes_received] = '\0';
@@ -287,17 +298,22 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   return success;
 
 error:
+  // Nettoyage en cas d'erreur
+  if (buffer) heap_caps_free(buffer);
   if (data_sock != -1) ::close(data_sock);
   if (sock_ != -1) {
     send(sock_, "QUIT\r\n", 6, 0);
     ::close(sock_);
     sock_ = -1;
   }
+  if (wdt_initialized) {
+    esp_task_wdt_delete(current_task);
+  }
   return false;
 }
 
 esp_err_t FTPHTTPProxy::http_req_handler(httpd_req_t *req) {
-  auto *proxy = (FTPHTTPProxy *)req->user_ctx;
+  auto *proxy = static_cast<FTPHTTPProxy *>(req->user_ctx);
   std::string requested_path = req->uri;
 
   // Suppression du premier slash
