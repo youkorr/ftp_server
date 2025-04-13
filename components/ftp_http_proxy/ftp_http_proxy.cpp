@@ -13,6 +13,16 @@ static const char *TAG = "ftp_proxy";
 namespace esphome {
 namespace ftp_http_proxy {
 
+// Nouvelle méthode statique qui servira de point d'entrée pour le gestionnaire HTTP
+esp_err_t FTPHTTPProxy::static_http_req_handler(httpd_req_t *req) {
+  auto *proxy = static_cast<FTPHTTPProxy *>(req->user_ctx);
+  if (proxy == nullptr) {
+    ESP_LOGE(TAG, "User context is null");
+    return ESP_FAIL;
+  }
+  return proxy->internal_http_req_handler(req);
+}
+
 void FTPHTTPProxy::setup() {
   ESP_LOGI(TAG, "Initialisation du proxy FTP/HTTP");
 
@@ -146,7 +156,6 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   int flag = 1;
   int rcvbuf = 16384;
   char* buffer = nullptr;
-  struct timeval tv;
 
   // Déterminer si c'est un fichier média basé sur l'extension
   size_t dot_pos = remote_path.find_last_of('.');
@@ -234,6 +243,7 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   setsockopt(data_sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
   
   // Ajouter un timeout sur le socket de données
+  struct timeval tv;
   tv.tv_sec = 5;
   tv.tv_usec = 0;
   setsockopt(data_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
@@ -270,8 +280,7 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
     esp_task_wdt_reset();
     ESP_LOGI(TAG, "WDT reset avant le transfert");
   }
-  
-  // Boucle principale de transfert de données
+    // Dans ta boucle principale de transfert de données :
   while ((bytes_received = recv(data_sock, buffer, buffer_size, 0)) > 0) {
     total_bytes_transferred += bytes_received;
     bytes_since_reset += bytes_received;
@@ -289,8 +298,18 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
       ESP_LOGD(TAG, "WDT reset après ~32 Ko, total transféré: %d Ko", total_bytes_transferred / 1024);
       bytes_since_reset = 0;
     }
+  }
+
+  // Transfert en streaming avec un buffer plus petit pour éviter les problèmes de mémoire
+    
+    esp_err_t err = httpd_resp_send_chunk(req, buffer, bytes_received);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Échec d'envoi au client: %d", err);
+      goto error;
+    }
     
     // Comptez les chunks pour les fichiers média pour surveiller la progression
+    chunk_count++;
     if (is_media_file && (chunk_count % 50 == 0)) {  // Réduit de 100 à 50
       ESP_LOGD(TAG, "Streaming média: %d chunks envoyés, %zu Ko", chunk_count, total_bytes_transferred / 1024);
     }
@@ -309,7 +328,6 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
       // Yield moins fréquent pour les autres fichiers
       vTaskDelay(pdMS_TO_TICKS(1));
     }
-  }
 
   // Fermeture du socket de données
   ::close(data_sock);
@@ -369,8 +387,8 @@ error:
   return false;
 }
 
-esp_err_t FTPHTTPProxy::http_req_handler(httpd_req_t *req) {
-  auto *proxy = static_cast<FTPHTTPProxy *>(req->user_ctx);
+// Renommer http_req_handler en internal_http_req_handler
+esp_err_t FTPHTTPProxy::internal_http_req_handler(httpd_req_t *req) {
   std::string requested_path = req->uri;
 
   // Suppression du premier slash
@@ -434,10 +452,10 @@ esp_err_t FTPHTTPProxy::http_req_handler(httpd_req_t *req) {
     esp_task_wdt_reset();
   }
   
-  for (const auto &configured_path : proxy->remote_paths_) {
+  for (const auto &configured_path : remote_paths_) {
     if (requested_path == configured_path) {
       ESP_LOGI(TAG, "Téléchargement du fichier: %s", requested_path.c_str());
-      if (proxy->download_file(configured_path, req)) {
+      if (download_file(configured_path, req)) {
         ESP_LOGI(TAG, "Téléchargement réussi");
         return ESP_OK;
       } else {
@@ -474,18 +492,12 @@ void FTPHTTPProxy::setup_http_server() {
   httpd_uri_t uri_proxy = {
     .uri       = "/*",
     .method    = HTTP_GET,
-    .handler   = http_req_handler,
+    .handler   = static_http_req_handler,  // Utiliser le gestionnaire statique
     .user_ctx  = this
   };
 
   httpd_register_uri_handler(server_, &uri_proxy);
   ESP_LOGI(TAG, "Serveur HTTP démarré sur le port %d", local_port_);
-}
-
-// Helper function for http_req_handler  
-esp_err_t http_req_handler(httpd_req_t *req) {
-  auto *proxy = static_cast<FTPHTTPProxy *>(req->user_ctx);
-  return proxy->http_req_handler(req);
 }
 
 }  // namespace ftp_http_proxy
