@@ -159,6 +159,7 @@ void FTPServer::handle_new_clients() {
 void FTPServer::handle_ftp_client(int client_socket) {
   char buffer[512];
   int len = recv(client_socket, buffer, sizeof(buffer) - 1, MSG_DONTWAIT);
+
   if (len > 0) {
     buffer[len] = '\0';
     std::string command(buffer);
@@ -176,8 +177,18 @@ void FTPServer::handle_ftp_client(int client_socket) {
     }
   } else if (errno != EWOULDBLOCK && errno != EAGAIN) {
     ESP_LOGW(TAG, "Socket error: %d", errno);
+    close(client_socket);
+    auto it = std::find(client_sockets_.begin(), client_sockets_.end(), client_socket);
+    if (it != client_sockets_.end()) {
+      size_t index = it - client_sockets_.begin();
+      client_sockets_.erase(it);
+      client_states_.erase(client_states_.begin() + index);
+      client_usernames_.erase(client_usernames_.begin() + index);
+      client_current_paths_.erase(client_current_paths_.begin() + index);
+    }
   }
 }
+
 
 void FTPServer::process_command(int client_socket, const std::string& command) {
   ESP_LOGI(TAG, "FTP command: %s", command.c_str());
