@@ -1,151 +1,237 @@
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "esp_log.h"
-#include "esp_spiffs.h"
-#include "esp_heap_caps.h"
-#include "driver/gpio.h"
-#include "mjpeg_decoder.h" // Notre fichier d'en-tête créé précédemment
+#include "esphome.h"
+#include "esp_http_client.h"
 
-static const char* TAG = "MJPEG_EXAMPLE";
+// Ajout des bibliothèques nécessaires pour MP4
+#include "esp32_video_decoder.h" // Une bibliothèque hypothétique pour le décodage vidéo
 
-// Exemple d'implémentation de Stream pour fichier SPIFFS
-typedef struct {
-    FILE* file;
-} SPIFFSStream;
+namespace esphome {
+namespace mp4_decoder {
 
-// Fonction de lecture pour le stream SPIFFS
-size_t spiffs_read(void* buf, size_t size) {
-    SPIFFSStream* stream = (SPIFFSStream*)_input; // Supposant que _input est accessible
-    return fread(buf, 1, size, stream->file);
-}
+#define READ_BUFFER_SIZE 8192
+#define FRAME_BUFFER_SIZE 76800 // 320x240 pixels
 
-// Fonction pour vérifier les données disponibles
-size_t spiffs_available() {
-    SPIFFSStream* stream = (SPIFFSStream*)_input;
-    long current = ftell(stream->file);
-    fseek(stream->file, 0, SEEK_END);
-    long size = ftell(stream->file);
-    fseek(stream->file, current, SEEK_SET);
-    return size - current;
-}
+class MP4Decoder : public Component {
+ public:
+  MP4Decoder() {}
 
-// Implémentation de la fonction de dessin pour le décodeur MJPEG
-// À adapter selon votre affichage (LCD, TFT, etc.)
-int drawMCU(JPEGDRAW *pDraw) {
-    uint16_t *pPixel = pDraw->pPixels;
-    
-    // Exemple : Afficher sur un écran LCD/TFT
-    // lcd_draw_bitmap(pDraw->x, pDraw->y, pDraw->iWidth, pDraw->iHeight, pPixel);
-    
-    ESP_LOGI(TAG, "Drawing MCU at x=%d, y=%d, width=%d, height=%d", 
-             pDraw->x, pDraw->y, pDraw->iWidth, pDraw->iHeight);
-    
-    return 1; // Return 1 pour continuer, 0 pour arrêter
-}
+  void setup() override {
+    ESP_LOGI("MP4", "MP4Decoder setup");
+    // Initialisation spécifique à ESPHome
+  }
 
-// Initialisation du système de fichiers SPIFFS
-static void init_spiffs(void) {
-    ESP_LOGI(TAG, "Initializing SPIFFS");
-    
-    esp_vfs_spiffs_conf_t conf = {
-        .base_path = "/spiffs",
-        .partition_label = NULL,
-        .max_files = 5,
-        .format_if_mount_failed = true
-    };
-    
-    esp_err_t ret = esp_vfs_spiffs_register(&conf);
-    
-    if (ret != ESP_OK) {
-        if (ret == ESP_FAIL) {
-            ESP_LOGE(TAG, "Failed to mount or format filesystem");
-        } else if (ret == ESP_ERR_NOT_FOUND) {
-            ESP_LOGE(TAG, "Failed to find SPIFFS partition");
-        } else {
-            ESP_LOGE(TAG, "Failed to initialize SPIFFS (%s)", esp_err_to_name(ret));
-        }
-        return;
+  void loop() override {
+    // La fonction loop de ESPHome, appelée régulièrement
+    if (_stream != nullptr && _is_running) {
+      if (mp4_read_frame()) {
+        mp4_decode_frame();
+        mp4_render_frame();
+      }
+    }
+  }
+
+  // Initialisation du décodeur MP4
+  bool init(Stream *stream, int32_t bufferSize, void (*renderCallback)(uint16_t*, int, int, int, int),
+            int decodeCore, int renderCore) {
+    _stream = stream;
+    _bufferSize = bufferSize;
+    _renderCallback = renderCallback;
+
+    // Allocation des buffers pour la lecture et le décodage
+    _read_buf = (uint8_t *)heap_caps_malloc(READ_BUFFER_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!_read_buf) {
+      ESP_LOGE("MP4", "Échec de l'allocation du buffer de lecture");
+      return false;
     }
     
-    size_t total = 0, used = 0;
-    ret = esp_spiffs_info(NULL, &total, &used);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to get SPIFFS partition information (%s)", esp_err_to_name(ret));
-    } else {
-        ESP_LOGI(TAG, "Partition size: total: %d, used: %d", total, used);
+    _frame_buffer = (uint16_t *)heap_caps_malloc(FRAME_BUFFER_SIZE * sizeof(uint16_t), MALLOC_CAP_DMA);
+    if (!_frame_buffer) {
+      ESP_LOGE("MP4", "Échec de l'allocation du buffer de frame");
+      free(_read_buf);
+      return false;
     }
-}
 
-void app_main(void) {
-    ESP_LOGI(TAG, "Starting MJPEG Decoder Example");
+    // Initialisation du décodeur vidéo
+    _video_decoder = new ESP32VideoDecoder();
+    if (!_video_decoder->init(320, 240)) { // Dimensions supposées de la vidéo
+      ESP_LOGE("MP4", "Échec de l'initialisation du décodeur vidéo");
+      cleanup();
+      return false;
+    }
+
+    // Création des tâches pour le décodage et le rendu
+    xTaskCreatePinnedToCore(
+        [](void *instance) { static_cast<MP4Decoder *>(instance)->decode_task_func(); },
+        "MP4_decode",
+        8192, // Taille de stack plus grande pour le décodage complexe
+        this,
+        configMAX_PRIORITIES - 1,
+        &_decodeTask,
+        decodeCore);
+        
+    xTaskCreatePinnedToCore(
+        [](void *instance) { static_cast<MP4Decoder *>(instance)->render_task_func(); },
+        "MP4_render",
+        4096,
+        this,
+        configMAX_PRIORITIES - 2,
+        &_renderTask,
+        renderCore);
+
+    // Initialisation des queues pour la communication entre tâches
+    _decode_queue = xQueueCreate(3, sizeof(uint8_t*));
+    _render_queue = xQueueCreate(3, sizeof(uint16_t*));
+
+    _is_running = true;
+    return true;
+  }
+  
+  // Fonction pour lire une frame MP4
+  bool mp4_read_frame() {
+    // Structure MP4 parsing logic
+    // Cette partie est complexe et nécessiterait une bibliothèque dédiée pour l'analyse MP4
     
-    // Initialiser SPIFFS
-    init_spiffs();
-    
-    // Ouvrir un fichier vidéo MJPEG depuis SPIFFS
-    FILE* file = fopen("/spiffs/video.mjpeg", "rb");
-    if (!file) {
-        ESP_LOGE(TAG, "Failed to open video file");
-        return;
+    // Lecture des données du stream
+    int bytes_read = _stream->readBytes(_read_buf, READ_BUFFER_SIZE);
+    if (bytes_read <= 0) {
+      return false;
     }
     
-    // Créer un Stream pour le fichier
-    SPIFFSStream spiffsStream = {
-        .file = file
-    };
+    // Analyse de l'en-tête MP4 et localisation de la prochaine frame vidéo
+    // Note: Ceci est simplifié et ne fonctionnera pas pour un vrai MP4
+    // Un parseur MP4 complet est nécessaire ici
     
-    // Créer l'interface Stream requise par le décodeur
-    Stream_t stream = {
-        .read = spiffs_read,
-        .available = spiffs_available
-    };
+    // Supposons que nous avons extrait une frame
+    _current_frame_size = bytes_read; // Simplification
     
-    // Initialiser le décodeur MJPEG
-    int mjpegBufferSize = 32 * 1024; // 32KB de buffer pour le décodage
-    bool useBigEndian = false;       // Selon votre écran
+    // Envoi du buffer vers la tâche de décodage
+    xQueueSend(_decode_queue, &_read_buf, portMAX_DELAY);
     
-    if (!mjpeg_setup(&stream, mjpegBufferSize, drawMCU, useBigEndian, 0, 1)) {
-        ESP_LOGE(TAG, "Failed to initialize MJPEG decoder");
-        fclose(file);
-        return;
+    return true;
+  }
+
+  // Fonction pour décoder la frame MP4
+  bool mp4_decode_frame() {
+    // Cette fonction est appelée par la tâche de décodage
+    return true;
+  }
+  
+  // Fonction pour rendre la frame décodée
+  bool mp4_render_frame() {
+    // Cette fonction est appelée par la tâche de rendu
+    return true;
+  }
+
+  // Fonction pour nettoyer les ressources
+  void cleanup() {
+    _is_running = false;
+    
+    // Arrêter les tâches
+    if (_decodeTask) {
+      vTaskDelete(_decodeTask);
+      _decodeTask = nullptr;
     }
     
-    ESP_LOGI(TAG, "MJPEG decoder initialized successfully");
-    
-    // Boucle de lecture et d'affichage de la vidéo
-    int frameCount = 0;
-    unsigned long startTime = millis();
-    
-    while (1) {
-        // Lire une frame
-        if (mjpeg_read_frame()) {
-            // Afficher la frame
-            mjpeg_draw_frame();
-            frameCount++;
-            
-            // Afficher des statistiques toutes les 30 frames
-            if (frameCount % 30 == 0) {
-                unsigned long currentTime = millis();
-                float fps = frameCount * 1000.0 / (currentTime - startTime);
-                ESP_LOGI(TAG, "FPS: %.2f", fps);
-            }
-            
-            // Pause entre les frames
-            vTaskDelay(pdMS_TO_TICKS(33)); // ~30fps
-        } else {
-            // Fin du fichier, recommencer ou terminer
-            ESP_LOGI(TAG, "End of video file");
-            
-            // Pour boucler la vidéo:
-            fseek(file, 0, SEEK_SET);
-            
-            // Ou pour quitter:
-            // break;
-        }
+    if (_renderTask) {
+      vTaskDelete(_renderTask);
+      _renderTask = nullptr;
     }
     
-    // Nettoyage
-    mjpeg_cleanup();
-    fclose(file);
-    ESP_LOGI(TAG, "MJPEG decoder demo completed");
-}
+    // Libérer les buffers
+    if (_read_buf) {
+      free(_read_buf);
+      _read_buf = nullptr;
+    }
+    
+    if (_frame_buffer) {
+      free(_frame_buffer);
+      _frame_buffer = nullptr;
+    }
+    
+    // Nettoyer le décodeur
+    if (_video_decoder) {
+      delete _video_decoder;
+      _video_decoder = nullptr;
+    }
+    
+    // Supprimer les queues
+    if (_decode_queue) {
+      vQueueDelete(_decode_queue);
+      _decode_queue = nullptr;
+    }
+    
+    if (_render_queue) {
+      vQueueDelete(_render_queue);
+      _render_queue = nullptr;
+    }
+  }
+
+ protected:
+  // Fonction pour la tâche de décodage
+  void decode_task_func() {
+    uint8_t *buffer;
+    ESP_LOGI("MP4", "Tâche de décodage démarrée");
+    
+    while (_is_running && xQueueReceive(_decode_queue, &buffer, portMAX_DELAY)) {
+      unsigned long start_time = millis();
+
+      // Décodage de la frame H.264/H.265
+      // Utilisation d'une bibliothèque de décodage hardware si disponible
+      bool success = _video_decoder->decodeFrame(buffer, _current_frame_size, _frame_buffer);
+      
+      if (success) {
+        // Envoi de la frame décodée vers la tâche de rendu
+        xQueueSend(_render_queue, &_frame_buffer, portMAX_DELAY);
+      } else {
+        ESP_LOGE("MP4", "Échec du décodage de la frame");
+      }
+
+      _total_decode_time += millis() - start_time;
+    }
+    
+    ESP_LOGI("MP4", "Tâche de décodage terminée");
+  }
+
+  // Fonction pour la tâche de rendu
+  void render_task_func() {
+    uint16_t *frame;
+    ESP_LOGI("MP4", "Tâche de rendu démarrée");
+    
+    while (_is_running && xQueueReceive(_render_queue, &frame, portMAX_DELAY)) {
+      unsigned long start_time = millis();
+
+      // Appel du callback de rendu avec la frame
+      if (_renderCallback) {
+        _renderCallback(frame, 0, 0, 320, 240); // Paramètres supposés
+      }
+
+      _total_render_time += millis() - start_time;
+    }
+    
+    ESP_LOGI("MP4", "Tâche de rendu terminée");
+  }
+
+  // Variables membres
+  Stream *_stream = nullptr;
+  int32_t _bufferSize = 0;
+  uint8_t *_read_buf = nullptr;
+  uint16_t *_frame_buffer = nullptr;
+  int32_t _current_frame_size = 0;
+  bool _is_running = false;
+
+  TaskHandle_t _decodeTask = nullptr;
+  TaskHandle_t _renderTask = nullptr;
+  QueueHandle_t _decode_queue = nullptr;
+  QueueHandle_t _render_queue = nullptr;
+
+  void (*_renderCallback)(uint16_t*, int, int, int, int) = nullptr;
+
+  // Pour le décodage vidéo
+  class ESP32VideoDecoder *_video_decoder = nullptr;
+
+  // Statistiques
+  unsigned long _total_decode_time = 0;
+  unsigned long _total_render_time = 0;
+};
+
+}  // namespace mp4_decoder
+}  // namespace esphome
