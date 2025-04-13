@@ -270,6 +270,25 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
     esp_task_wdt_reset();
     ESP_LOGI(TAG, "WDT reset avant le transfert");
   }
+    // Dans ta boucle principale de transfert de données :
+  while ((bytes_received = recv(data_sock, buffer, buffer_size, 0)) > 0) {
+    total_bytes_transferred += bytes_received;
+    bytes_since_reset += bytes_received;
+    chunk_count++;
+  
+    // Envoie des données par chunk HTTP
+    if (httpd_resp_send_chunk(req, buffer, bytes_received) != ESP_OK) {
+      ESP_LOGE(TAG, "Erreur lors de l'envoi du chunk HTTP");
+      goto error;
+    }
+  
+    // Reset watchdog toutes les ~32 Ko transférés
+    if (bytes_since_reset >= 32 * 1024) {
+      esp_task_wdt_reset();
+      ESP_LOGD(TAG, "WDT reset après ~32 Ko, total transféré: %d Ko", total_bytes_transferred / 1024);
+      bytes_since_reset = 0;
+    }
+  }
 
   // Transfert en streaming avec un buffer plus petit pour éviter les problèmes de mémoire
   while (true) {
