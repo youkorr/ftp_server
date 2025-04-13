@@ -291,25 +291,6 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   }
 
   // Transfert en streaming avec un buffer plus petit pour éviter les problèmes de mémoire
-  while (true) {
-    // Réinitialiser le watchdog plus fréquemment pour les fichiers média
-    if (is_media_file && bytes_since_reset >= 32768 && wdt_initialized) { // ~32Ko
-      esp_task_wdt_reset();
-      bytes_since_reset = 0;
-      ESP_LOGD(TAG, "WDT reset après ~32 Ko, total transféré: %zu Ko", total_bytes_transferred / 1024);
-    }
-    
-    bytes_received = recv(data_sock, buffer, buffer_size, 0);
-    if (bytes_received <= 0) {
-      if (bytes_received < 0) {
-        ESP_LOGE(TAG, "Erreur de réception des données: %d", errno);
-      }
-      break;
-    }
-
-    // Mettre à jour les compteurs de bytes
-    total_bytes_transferred += bytes_received;
-    bytes_since_reset += bytes_received;
     
     esp_err_t err = httpd_resp_send_chunk(req, buffer, bytes_received);
     if (err != ESP_OK) {
