@@ -20,21 +20,44 @@ void FTPHTTPProxy::setup() {
   
   // Configuration du watchdog avec un délai plus long
   esp_task_wdt_config_t wdt_config = {
-    .timeout_ms = 10000,  // Augmenter à 10 secondes (défaut est 5s)
+    .timeout_ms = 15000,  // Augmenté à 15 secondes (au lieu de 10s)
     .idle_core_mask = 0,  // Sans surveillance des cœurs inactifs
-    .trigger_panic = true
+    .trigger_panic = false // Ne pas paniquer en cas de timeout - juste un log
   };
   esp_err_t err = esp_task_wdt_init(&wdt_config);
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Impossible de configurer le watchdog: %d", err);
   } else {
-    ESP_LOGI(TAG, "Watchdog configuré avec timeout de 10s");
+    ESP_LOGI(TAG, "Watchdog configuré avec timeout de 15s");
+  }
+  
+  // Ajouter la tâche principale au watchdog
+  TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
+  if (esp_task_wdt_add(current_task) == ESP_OK) {
+    ESP_LOGI(TAG, "Tâche principale ajoutée au watchdog");
   }
   
   this->setup_http_server();
 }
 
-void FTPHTTPProxy::loop() {}
+void FTPHTTPProxy::loop() {
+  // Réinitialiser le watchdog dans la boucle principale
+  TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
+  if (esp_task_wdt_status(current_task) == ESP_OK) {
+    esp_task_wdt_reset();
+  }
+  
+  // Surveiller l'état de la mémoire périodiquement
+  static uint32_t last_heap_check = 0;
+  uint32_t now = millis();
+  if (now - last_heap_check > 30000) { // Toutes les 30 secondes
+    last_heap_check = now;
+    ESP_LOGI(TAG, "Heap: %d, min: %d, largest block: %d", 
+             heap_caps_get_free_size(MALLOC_CAP_DEFAULT),
+             heap_caps_get_minimum_free_size(MALLOC_CAP_DEFAULT),
+             heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
+  }
+}
 
 bool FTPHTTPProxy::connect_to_ftp() {
   struct hostent *ftp_host = gethostbyname(ftp_server_.c_str());
@@ -56,6 +79,13 @@ bool FTPHTTPProxy::connect_to_ftp() {
   // Augmenter la taille du buffer de réception
   int rcvbuf = 16384;
   setsockopt(sock_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+  
+  // Ajouter un timeout pour éviter les blocages
+  struct timeval tv;
+  tv.tv_sec = 5;
+  tv.tv_usec = 0;
+  setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  setsockopt(sock_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
   struct sockaddr_in server_addr;
   memset(&server_addr, 0, sizeof(server_addr));
@@ -113,8 +143,9 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   int data_port = 0;
   int ip[4], port[2]; 
   int bytes_received;
-  int flag = 1;  // Déplacé avant les goto
-  int rcvbuf = 16384; // Déplacé avant les goto
+  int flag = 1;
+  int rcvbuf = 16384;
+  char* buffer = nullptr;
 
   // Déterminer si c'est un fichier média basé sur l'extension
   size_t dot_pos = remote_path.find_last_of('.');
@@ -142,10 +173,10 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   
   // Ajuster la taille du buffer pour optimiser les performances
   // Pour les fichiers média, utiliser un buffer plus petit pour des réponses plus fréquentes
-  int buffer_size = is_media_file ? 4096 : 8192;
+  int buffer_size = is_media_file ? 2048 : 8192; // Réduit pour les fichiers média
   
   // Allouer le buffer en SPIRAM
-  char* buffer = (char*)heap_caps_malloc(buffer_size, MALLOC_CAP_SPIRAM);
+  buffer = (char*)heap_caps_malloc(buffer_size, MALLOC_CAP_SPIRAM);
   if (!buffer) {
     ESP_LOGE(TAG, "Échec d'allocation SPIRAM pour le buffer");
     if (wdt_initialized) esp_task_wdt_delete(current_task);
@@ -155,9 +186,14 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   // Réinitialiser le watchdog avant des opérations potentiellement longues
   if (wdt_initialized) esp_task_wdt_reset();
 
+  // Vérifier l'état de la mémoire avant de commencer le téléchargement
+  ESP_LOGI(TAG, "Heap avant connexion: %d, largest block: %d", 
+          heap_caps_get_free_size(MALLOC_CAP_DEFAULT),
+          heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
+
   if (!connect_to_ftp()) {
     ESP_LOGE(TAG, "Échec de connexion FTP");
-    if (buffer) heap_caps_free(buffer);
+    heap_caps_free(buffer);
     if (wdt_initialized) esp_task_wdt_delete(current_task);
     return false;
   }
@@ -195,6 +231,12 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   
   // Augmenter la taille du buffer de réception pour le socket de données
   setsockopt(data_sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+  
+  // Ajouter un timeout sur le socket de données
+  struct timeval tv;
+  tv.tv_sec = 5;
+  tv.tv_usec = 0;
+  setsockopt(data_sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
   struct sockaddr_in data_addr;
   memset(&data_addr, 0, sizeof(data_addr));
@@ -223,8 +265,21 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   buffer[bytes_received] = '\0';
   ESP_LOGD(TAG, "Réponse RETR: %s", buffer);
 
+  // Reset watchdog avant de commencer le transfert
+  if (wdt_initialized) {
+    esp_task_wdt_reset();
+    ESP_LOGI(TAG, "WDT reset avant le transfert");
+  }
+
   // Transfert en streaming avec un buffer plus petit pour éviter les problèmes de mémoire
   while (true) {
+    // Réinitialiser le watchdog plus fréquemment pour les fichiers média
+    if (is_media_file && bytes_since_reset >= 32768 && wdt_initialized) { // ~32Ko
+      esp_task_wdt_reset();
+      bytes_since_reset = 0;
+      ESP_LOGD(TAG, "WDT reset après ~32 Ko, total transféré: %zu Ko", total_bytes_transferred / 1024);
+    }
+    
     bytes_received = recv(data_sock, buffer, buffer_size, 0);
     if (bytes_received <= 0) {
       if (bytes_received < 0) {
@@ -237,13 +292,6 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
     total_bytes_transferred += bytes_received;
     bytes_since_reset += bytes_received;
     
-    // Pour les fichiers média, réinitialiser le watchdog tous les ~100Ko
-    if (is_media_file && bytes_since_reset >= 102400 && wdt_initialized) {
-      esp_task_wdt_reset();
-      bytes_since_reset = 0;
-      ESP_LOGD(TAG, "WDT reset après ~100 Ko, total transféré: %zu Ko", total_bytes_transferred / 1024);
-    }
-    
     esp_err_t err = httpd_resp_send_chunk(req, buffer, bytes_received);
     if (err != ESP_OK) {
       ESP_LOGE(TAG, "Échec d'envoi au client: %d", err);
@@ -252,14 +300,22 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
     
     // Comptez les chunks pour les fichiers média pour surveiller la progression
     chunk_count++;
-    if (is_media_file && (chunk_count % 100 == 0)) {
+    if (is_media_file && (chunk_count % 50 == 0)) {  // Réduit de 100 à 50
       ESP_LOGD(TAG, "Streaming média: %d chunks envoyés, %zu Ko", chunk_count, total_bytes_transferred / 1024);
     }
     
-    // Yield plus souvent pour les fichiers média, mais avec un délai plus court
-    if (is_media_file) {
-      vTaskDelay(pdMS_TO_TICKS(1));  // Délai minimal
-    } else {
+    // Yield plus fréquemment pour les fichiers média
+    if (is_media_file && (bytes_received % 1024 == 0)) {
+      // Forcer un yield tous les ~1KB pour les fichiers média
+      vTaskDelay(pdMS_TO_TICKS(1));
+      
+      // Reset watchdog si cela fait longtemps depuis le dernier reset
+      if (bytes_since_reset >= 20480 && wdt_initialized) { // ~20Ko
+        esp_task_wdt_reset();
+        bytes_since_reset = 0;
+      }
+    } else if (!is_media_file && (bytes_received % 4096 == 0)) {
+      // Yield moins fréquent pour les autres fichiers
       vTaskDelay(pdMS_TO_TICKS(1));
     }
   }
@@ -278,7 +334,9 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   
   // Libérer le buffer SPIRAM
   heap_caps_free(buffer);
+  buffer = nullptr;
   
+  // Envoi du chunk final
   httpd_resp_send_chunk(req, NULL, 0);
   
   // Statistiques finales
@@ -288,19 +346,24 @@ bool FTPHTTPProxy::download_file(const std::string &remote_path, httpd_req_t *re
   if (wdt_initialized) {
     esp_task_wdt_delete(current_task);
   }
+  
   // Fermeture des sockets
   send(sock_, "QUIT\r\n", 6, 0);
   ::close(sock_);
   sock_ = -1;
 
-  // Envoi du chunk final
-  httpd_resp_send_chunk(req, NULL, 0);
   return success;
 
 error:
   // Nettoyage en cas d'erreur
-  if (buffer) heap_caps_free(buffer);
-  if (data_sock != -1) ::close(data_sock);
+  if (buffer) {
+    heap_caps_free(buffer);
+    buffer = nullptr;
+  }
+  if (data_sock != -1) {
+    ::close(data_sock);
+    data_sock = -1;
+  }
   if (sock_ != -1) {
     send(sock_, "QUIT\r\n", 6, 0);
     ::close(sock_);
@@ -309,6 +372,9 @@ error:
   if (wdt_initialized) {
     esp_task_wdt_delete(current_task);
   }
+  
+  // Envoi d'un message d'erreur
+  httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Échec du téléchargement");
   return false;
 }
 
@@ -371,6 +437,12 @@ esp_err_t FTPHTTPProxy::http_req_handler(httpd_req_t *req) {
   // Pour traiter les gros fichiers, on ajoute des en-têtes supplémentaires
   httpd_resp_set_hdr(req, "Accept-Ranges", "bytes");
   
+  // Réinitialiser le watchdog avant de traiter le fichier
+  TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
+  if (esp_task_wdt_status(current_task) == ESP_OK) {
+    esp_task_wdt_reset();
+  }
+  
   for (const auto &configured_path : proxy->remote_paths_) {
     if (requested_path == configured_path) {
       ESP_LOGI(TAG, "Téléchargement du fichier: %s", requested_path.c_str());
@@ -401,6 +473,7 @@ void FTPHTTPProxy::setup_http_server() {
   config.max_uri_handlers = 8;
   config.max_resp_headers = 20;
   config.stack_size = 12288;
+  config.task_priority = tskIDLE_PRIORITY + 5; // Priorité plus élevée pour la tâche HTTP
 
   if (httpd_start(&server_, &config) != ESP_OK) {
     ESP_LOGE(TAG, "Échec du démarrage du serveur HTTP");
