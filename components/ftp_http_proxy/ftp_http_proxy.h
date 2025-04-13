@@ -1,46 +1,43 @@
 #pragma once
-#include "esphome.h"
-#include <vector>
+
+#include "esphome/core/component.h"
+#include "esp_http_server.h"
 #include <string>
-#include <esp_http_server.h>
-#include <lwip/sockets.h>
+#include <vector>
 
 namespace esphome {
 namespace ftp_http_proxy {
 
 class FTPHTTPProxy : public Component {
- public:
-  void set_ftp_server(const std::string &server) { ftp_server_ = server; }
-  void set_username(const std::string &username) { username_ = username; }
-  void set_password(const std::string &password) { password_ = password; }
-  void add_remote_path(const std::string &path) { remote_paths_.push_back(path); }
-  void set_local_port(uint16_t port) { local_port_ = port; }
-
+public:
   void setup() override;
   void loop() override;
-  float get_setup_priority() const override { return esphome::setup_priority::AFTER_WIFI; }
+  
+  void set_ftp_server(const std::string &ftp_server) { ftp_server_ = ftp_server; }
+  void set_username(const std::string &username) { username_ = username; }
+  void set_password(const std::string &password) { password_ = password; }
+  void set_local_port(uint16_t local_port) { local_port_ = local_port; }
+  void add_remote_path(const std::string &path) { remote_paths_.push_back(path); }
+  
+  // Gestionnaire statique public pour les requêtes HTTP
+  static esp_err_t static_http_req_handler(httpd_req_t *req);
 
+protected:
+  // Méthode interne de traitement des requêtes
+  esp_err_t internal_http_req_handler(httpd_req_t *req);
+  
+  bool connect_to_ftp();
   bool download_file(const std::string &remote_path, httpd_req_t *req);
-
- protected:
+  void setup_http_server();
+  
   std::string ftp_server_;
   std::string username_;
   std::string password_;
+  uint16_t local_port_{80};
   std::vector<std::string> remote_paths_;
-  uint16_t local_port_{8000};
-  httpd_handle_t server_{nullptr};
-  int sock_{-1};
-  int ftp_port_ = 21;
-
-  bool send_ftp_command(const std::string &cmd, std::string &response);
-  bool connect_to_ftp();
-  bool setup_passive_mode(int &data_sock);
-  bool send_retr_command(const std::string &remote_path);
-  bool download_file_impl(const std::string &remote_path, httpd_req_t *req);
-  void setup_http_server();
   
-  static esp_err_t static_http_req_handler(httpd_req_t *req);
-  esp_err_t internal_http_req_handler(httpd_req_t *req);
+  int sock_{-1};
+  httpd_handle_t server_{nullptr};
 };
 
 }  // namespace ftp_http_proxy
